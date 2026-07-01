@@ -1,0 +1,558 @@
+@page "/chats/{ChatId:long}"
+@using Microsoft.EntityFrameworkCore
+@using TelegramMedia.Core.Data
+@using TelegramMedia.Core.Enums
+@using TelegramMedia.Core.Interfaces
+@inject ITelegramClientService TelegramClient
+@inject IDownloadManager DownloadManager
+@inject AppDbContext Db
+@inject NavigationManager Nav
+@implements IDisposable
+
+@if (_chat == null)
+{
+    <p>Loading chat...</p>
+}
+else
+{
+    <div style="display:flex; align-items:center; gap:12px; margin-bottom:20px;">
+        <a href="/chats" class="btn btn-secondary btn-sm">&larr; Back</a>
+        <h1 style="margin:0;">@_chat.Name</h1>
+        <span class="badge @GetTypeBadge(_chat.ChatType)">@_chat.ChatType</span>
+        @if (!string.IsNullOrEmpty(_chat.Username))
+        {
+            <span style="color:var(--text-secondary);">@@@_chat.Username</span>
+        }
+        @if (DownloadManager.IsChatPaused(ChatId))
+        {
+            <span class="badge badge-video">Chat Paused</span>
+        }
+    </div>
+
+    @if (!IsConnected)
+    {
+        <div class="alert alert-warning">
+            <strong>Not connected to Telegram (@TelegramClient.AuthState).</strong>
+            Scanning and downloading need an active Telegram session.
+            <a href="/" style="color:inherit; text-decoration:underline;">Go to the Dashboard to connect</a>.
+        </div>
+    }
+
+    @if (!string.IsNullOrEmpty(_message))
+    {
+        <div class="alert @(_isError ? "alert-danger" : "alert-info")">@_message</div>
+    }
+
+    <!-- Config -->
+    <div class="card">
+        <h3>Configuration</h3>
+        <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap:12px; align-items:center;">
+            <label><input type="checkbox" checked="@_chat.IsMonitored" @onchange="e => ToggleMonitor((bool)e.Value!)" /> Monitor</label>
+            <label><input type="checkbox" checked="@_chat.DownloadVideos" @onchange="e => SetMediaType(MediaType.Video, (bool)e.Value!)" /> Videos</label>
+            <label><input type="checkbox" checked="@_chat.DownloadPhotos" @onchange="e => SetMediaType(MediaType.Photo, (bool)e.Value!)" /> Photos</label>
+            <label><input type="checkbox" checked="@_chat.DownloadMusic" @onchange="e => SetMediaType(MediaType.Music, (bool)e.Value!)" /> Music</label>
+            <label><input type="checkbox" checked="@_chat.DownloadFiles" @onchange="e => SetMediaType(MediaType.File, (bool)e.Value!)" /> Files</label>
+            <div>
+                <label style="display:block;">Min Size (MB)</label>
+                <input class="form-control" type="number" value="@_chat.MinFileSizeMb"
+                       @onchange="e => UpdateMinSize(int.TryParse(e.Value?.ToString(), out var v) ? v : 0)" />
+            </div>
+            <div>
+                <label style="display:block;">Reaction</label>
+                <select class="form-control" value="@_chat.ReactionIcon"
+                        @onchange="e => UpdateReaction(e.Value?.ToString() ?? string.Empty)">
+                    <option value="">None</option>
+                    <option value="👍">👍</option>
+                    <option value="❤️">❤️</option>
+                    <option value="🔥">🔥</option>
+                    <option value="💯">💯</option>
+                    <option value="👌">👌</option>
+                </select>
+            </div>
+        </div>
+
+        <div style="display:flex; gap:8px; margin-top:16px; flex-wrap:wrap;">
+            <button class="btn btn-success" disabled="@(_isScanning || !IsConnected)" @onclick="ScanChannel">
+                @(_isScanning ? "Scanning…" : "Scan Channel")
+            </button>
+            <button class="btn btn-primary" disabled="@(_isScanning || !IsConnected)" @onclick="DownloadAll">Download All</button>
+            @if (DownloadManager.IsChatPaused(ChatId))
+            {
+                <button class="btn btn-primary" @onclick="() => ResumeChat()">▶ Resume Chat</button>
+            }
+            else
+            {
+                <button class="btn btn-secondary" @onclick="() => PauseChat()">⏸ Pause Chat</button>
+            }
+            <button class="btn btn-danger" @onclick="ResetQueue">Reset Queue</button>
+        </div>
+    </div>
+
+    <!-- Queue -->
+    <div class="card">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; flex-wrap:wrap; gap:8px;">
+            <h3 style="margin:0;">Files (@FilteredQueue.Count() of @_queueRows.Count)</h3>
+            <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+                <input class="form-control" style="width:200px; padding:6px;" placeholder="Filter filename..."
+                       @bind="_queueFilter" @bind:event="oninput" @bind:after="ResetPage" />
+                <select class="form-control" style="width:120px; padding:6px;" @bind="_queueTypeFilter" @bind:after="ResetPage">
+                    <option value="">All Types</option>
+                    <option value="Video">Videos</option>
+                    <option value="Photo">Photos</option>
+                    <option value="Music">Music</option>
+                    <option value="File">Files</option>
+                </select>
+                <select class="form-control" style="width:140px; padding:6px;" @bind="_queueStatusFilter" @bind:after="ResetPage">
+                    <option value="">All Statuses</option>
+                    <option value="Available">Available</option>
+                    <option value="Downloading">Downloading</option>
+                    <option value="Queued">Queued</option>
+                    <option value="Paused">Paused</option>
+                    <option value="Completed">Completed</option>
+                    <option value="Failed">Failed</option>
+                </select>
+            </div>
+        </div>
+
+        <!-- Bulk action bar -->
+        <div style="display:flex; gap:8px; align-items:center; margin-bottom:12px; flex-wrap:wrap;">
+            <span style="color:var(--text-secondary);"><strong>@_selected.Count</strong> selected</span>
+            <button class="btn btn-primary btn-sm" disabled="@(_selected.Count == 0)" @onclick="DownloadSelected">▶ Download</button>
+            <button class="btn btn-secondary btn-sm" disabled="@(_selected.Count == 0)" @onclick="PauseSelected">⏸ Pause</button>
+            <button class="btn btn-danger btn-sm" disabled="@(_selected.Count == 0)" @onclick="CancelSelected">✖ Cancel</button>
+            <button class="btn btn-secondary btn-sm" @onclick="SelectAllFiltered">Select all @FilteredQueue.Count() matching</button>
+            @if (_selected.Count > 0)
+            {
+                <button class="btn btn-secondary btn-sm" @onclick="() => _selected.Clear()">Clear selection</button>
+            }
+        </div>
+
+        @if (_queueRows.Any())
+        {
+            var filtered = FilteredQueue.ToList();
+            var total = filtered.Count;
+            var totalPages = Math.Max(1, (int)Math.Ceiling(total / (double)_pageSize));
+            if (_page > totalPages - 1) _page = totalPages - 1;
+            if (_page < 0) _page = 0;
+            var paged = filtered.Skip(_page * _pageSize).Take(_pageSize).ToList();
+            var pageIds = paged.Select(r => r.TaskId).ToList();
+            var allPageSelected = pageIds.Count > 0 && pageIds.All(_selected.Contains);
+
+            <div class="table-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th style="width:32px;">
+                                <input type="checkbox" checked="@allPageSelected" title="Select this page"
+                                       @onchange="e => ToggleSelectPage(pageIds, (bool)e.Value!)" />
+                            </th>
+                            <th>Type</th>
+                            <th>File</th>
+                            <th>Size</th>
+                            <th>Status</th>
+                            <th>Progress</th>
+                            <th>Speed</th>
+                            <th style="width:150px;">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var row in paged)
+                        {
+                            <tr>
+                                <td>
+                                    <input type="checkbox" checked="@_selected.Contains(row.TaskId)"
+                                           @onchange="e => ToggleSelect(row.TaskId, (bool)e.Value!)" />
+                                </td>
+                                <td><span class="badge @GetBadgeClass(row.MediaType)">@row.MediaType</span></td>
+                                <td style="max-width:280px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">@row.FileName</td>
+                                <td>@FormatSize(row.FileSize)</td>
+                                <td>
+                                    <span class="badge @GetStatusBadge(row.Status)"
+                                          title="@(row.Status == DownloadStatus.Failed ? row.ErrorMessage : null)">@row.Status</span>
+                                    @if (row.Status == DownloadStatus.Failed && !string.IsNullOrEmpty(row.ErrorMessage))
+                                    {
+                                        <div style="font-size:0.7rem; color:var(--danger); max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"
+                                             title="@row.ErrorMessage">@row.ErrorMessage</div>
+                                    }
+                                </td>
+                                <td style="min-width:120px;">
+                                    @if (row.Progress.HasValue)
+                                    {
+                                        <div class="progress-bar" style="margin:0;">
+                                            <div class="fill" style="width: @row.Progress.Value.ToString("F0")%"></div>
+                                        </div>
+                                        <div style="font-size:0.75rem; color:var(--text-secondary);">@row.Progress.Value.ToString("F0")%</div>
+                                    }
+                                    else { <span style="color:var(--text-secondary);">—</span> }
+                                </td>
+                                <td>@(row.Speed ?? "—")</td>
+                                <td style="white-space:nowrap;">
+                                    @if (row.Status is DownloadStatus.Downloading or DownloadStatus.Queued)
+                                    {
+                                        <button class="btn btn-secondary btn-sm" title="Pause" @onclick="() => PauseRow(row.TaskId)">⏸</button>
+                                    }
+                                    else if (row.Status is DownloadStatus.Available or DownloadStatus.Paused or DownloadStatus.Failed)
+                                    {
+                                        <button class="btn btn-primary btn-sm" title="Start" @onclick="() => StartRow(row.TaskId)">▶</button>
+                                    }
+                                    @if (row.Status != DownloadStatus.Completed)
+                                    {
+                                        <button class="btn btn-danger btn-sm" title="Cancel" @onclick="() => CancelRow(row.TaskId)">✖</button>
+                                    }
+                                    @if (row.Status is DownloadStatus.Available or DownloadStatus.Paused or DownloadStatus.Queued or DownloadStatus.Failed)
+                                    {
+                                        <button class="btn btn-secondary btn-sm" title="Move to top" @onclick="() => MoveToEdge(row.TaskId, true)">⤒</button>
+                                        <button class="btn btn-secondary btn-sm" title="Higher priority" @onclick="() => MovePriority(row.TaskId, -1)">▲</button>
+                                        <button class="btn btn-secondary btn-sm" title="Lower priority" @onclick="() => MovePriority(row.TaskId, 1)">▼</button>
+                                        <button class="btn btn-secondary btn-sm" title="Move to bottom" @onclick="() => MoveToEdge(row.TaskId, false)">⤓</button>
+                                    }
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Pagination -->
+            <div style="display:flex; gap:10px; align-items:center; justify-content:space-between; margin-top:12px; flex-wrap:wrap;">
+                <span style="color:var(--text-secondary); font-size:0.85rem;">
+                    Showing @(total == 0 ? 0 : _page * _pageSize + 1)–@(Math.Min(total, (_page + 1) * _pageSize)) of @total
+                </span>
+                <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
+                    <label style="font-size:0.8rem; color:var(--text-secondary);">Per page</label>
+                    <select class="form-control" style="width:80px; padding:4px;" @bind="_pageSize" @bind:after="ResetPage">
+                        <option value="50">50</option>
+                        <option value="100">100</option>
+                        <option value="200">200</option>
+                        <option value="500">500</option>
+                    </select>
+                    <button class="btn btn-secondary btn-sm" disabled="@(_page <= 0)" @onclick="() => _page = 0">« First</button>
+                    <button class="btn btn-secondary btn-sm" disabled="@(_page <= 0)" @onclick="() => _page--">‹ Prev</button>
+                    <span style="font-size:0.85rem; min-width:110px; text-align:center;">Page @(_page + 1) of @totalPages</span>
+                    <button class="btn btn-secondary btn-sm" disabled="@(_page >= totalPages - 1)" @onclick="() => _page++">Next ›</button>
+                    <button class="btn btn-secondary btn-sm" disabled="@(_page >= totalPages - 1)" @onclick="() => _page = totalPages - 1">Last »</button>
+                </div>
+            </div>
+        }
+        else
+        {
+            <p style="color:var(--text-secondary);">No files yet. Click "Scan Channel" to list available media.</p>
+        }
+    </div>
+}
+
+@code {
+    [Parameter] public long ChatId { get; set; }
+
+    private MonitoredChat? _chat;
+    private List<QueueRow> _queueRows = new();
+    private readonly HashSet<int> _selected = new();
+    private string? _message;
+    private bool _isError;
+    private bool _isScanning;
+
+    private bool IsConnected => TelegramClient.AuthState == AuthState.Authenticated;
+
+    private bool EnsureConnected()
+    {
+        if (IsConnected) return true;
+        _isError = true;
+        _message = $"Not connected to Telegram ({TelegramClient.AuthState}). Connect on the Dashboard first.";
+        return false;
+    }
+    private string _queueFilter = "";
+    private string _queueTypeFilter = "";
+    private string _queueStatusFilter = "";
+    private int _page;
+    private int _pageSize = 100;
+    private Timer? _refreshTimer;
+
+    private void ResetPage() => _page = 0;
+
+    private record QueueRow(int TaskId, MediaType MediaType, string FileName, long FileSize,
+        DownloadStatus Status, int Priority, double? Progress, string? Speed, DateTime CreatedAt,
+        string? ErrorMessage);
+
+    private IEnumerable<QueueRow> FilteredQueue => _queueRows
+        .Where(r => string.IsNullOrEmpty(_queueFilter)
+                 || r.FileName.Contains(_queueFilter, StringComparison.OrdinalIgnoreCase))
+        .Where(r => string.IsNullOrEmpty(_queueTypeFilter)
+                 || r.MediaType.ToString() == _queueTypeFilter)
+        .Where(r => string.IsNullOrEmpty(_queueStatusFilter)
+                 || r.Status.ToString() == _queueStatusFilter)
+        .OrderBy(r => r.Status switch
+        {
+            DownloadStatus.Downloading => 0,
+            DownloadStatus.Queued => 1,
+            DownloadStatus.Available => 2,
+            DownloadStatus.Paused => 3,
+            DownloadStatus.Failed => 4,
+            DownloadStatus.Completed => 5,
+            _ => 6
+        })
+        .ThenBy(r => r.Priority)
+        .ThenByDescending(r => r.CreatedAt);
+
+
+    protected override async Task OnInitializedAsync()
+    {
+        await Load();
+        DownloadManager.OnStateChanged += OnStateChanged;
+        TelegramClient.OnStatusMessage += OnStatusMessage;
+        _refreshTimer = new Timer(_ => InvokeAsync(Load), null, 3000, 3000);
+    }
+
+    private void OnStatusMessage(string msg)
+    {
+        // Surface live scan/download progress from the Telegram client while scanning.
+        if (!_isScanning) return;
+        _message = msg;
+        _isError = false;
+        InvokeAsync(StateHasChanged);
+    }
+
+    protected override async Task OnParametersSetAsync() => await Load();
+
+    private async Task Load()
+    {
+        _chat = await Db.MonitoredChats.FirstOrDefaultAsync(c => c.TelegramChatId == ChatId);
+        if (_chat == null) return;
+
+        var allTasks = await Db.DownloadTasks
+            .Where(t => t.TelegramChatId == ChatId)
+            .ToListAsync();
+
+        var liveById = DownloadManager.ActiveDownloads.ToDictionary(d => d.TaskId);
+
+        _queueRows = allTasks
+            .Select(t =>
+            {
+                var live = liveById.GetValueOrDefault(t.Id);
+                return new QueueRow(t.Id, t.MediaType, t.FileName, t.FileSize,
+                    live?.Status ?? t.Status,
+                    t.Priority,
+                    live != null && live.FileSize > 0 ? live.ProgressPercent : null,
+                    live?.SpeedDisplay,
+                    t.CreatedAt,
+                    t.ErrorMessage);
+            })
+            .ToList();
+
+        // Drop selections for tasks that no longer exist.
+        var existing = _queueRows.Select(r => r.TaskId).ToHashSet();
+        _selected.RemoveWhere(id => !existing.Contains(id));
+
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private void OnStateChanged() => InvokeAsync(Load);
+
+    // --- Selection ---
+
+    private void ToggleSelect(int taskId, bool selected)
+    {
+        if (selected) _selected.Add(taskId);
+        else _selected.Remove(taskId);
+    }
+
+    private void ToggleSelectPage(List<int> pageIds, bool selected)
+    {
+        if (selected) foreach (var id in pageIds) _selected.Add(id);
+        else foreach (var id in pageIds) _selected.Remove(id);
+    }
+
+    private void SelectAllFiltered()
+    {
+        foreach (var r in FilteredQueue) _selected.Add(r.TaskId);
+    }
+
+    // --- Bulk actions ---
+
+    private async Task DownloadSelected()
+    {
+        if (!EnsureConnected()) return;
+        var ids = _selected.ToList();
+        await DownloadManager.StartTasksAsync(ids);
+        _isError = false;
+        _message = $"Started {ids.Count} file(s).";
+        await Load();
+    }
+
+    private async Task PauseSelected()
+    {
+        await DownloadManager.PauseTasksAsync(_selected.ToList());
+        await Load();
+    }
+
+    private async Task CancelSelected()
+    {
+        await DownloadManager.CancelTasksAsync(_selected.ToList());
+        await Load();
+    }
+
+    // --- Per-row actions ---
+
+    private async Task StartRow(int id) { if (!EnsureConnected()) return; await DownloadManager.StartTasksAsync(new[] { id }); await Load(); }
+    private async Task PauseRow(int id) { await DownloadManager.PauseTasksAsync(new[] { id }); await Load(); }
+    private async Task CancelRow(int id) { await DownloadManager.CancelTasksAsync(new[] { id }); await Load(); }
+    private async Task MovePriority(int id, int dir) { await DownloadManager.SetPriorityAsync(id, dir); await Load(); }
+    private async Task MoveToEdge(int id, bool toTop) { await DownloadManager.MoveToEdgeAsync(id, toTop); await Load(); }
+
+    // --- Channel actions ---
+
+    private async Task ScanChannel()
+    {
+        if (!EnsureConnected()) return;
+        _isError = false;
+        _isScanning = true;
+        _message = "Scanning history…";
+        await InvokeAsync(StateHasChanged);
+        try
+        {
+            var (scanned, listed) = await TelegramClient.ScanAndListHistoryAsync(ChatId, CancellationToken.None);
+            _isError = false;
+            _message = listed > 0
+                ? $"Scanned {scanned} messages, listed {listed} new file(s). Select what to download, or use Download All."
+                : $"Scanned {scanned} messages — no new files (everything is already listed).";
+        }
+        catch (Exception ex)
+        {
+            _isError = true;
+            _message = $"Scan failed: {ex.Message}";
+        }
+        finally
+        {
+            _isScanning = false;
+            await Load();
+        }
+    }
+
+    private async Task DownloadAll()
+    {
+        if (!EnsureConnected()) return;
+
+        // Ensure the channel has been listed at least once.
+        if (_queueRows.Count == 0)
+        {
+            await ScanChannel();
+            if (_isError) return;
+        }
+
+        var ids = _queueRows
+            .Where(r => r.Status is not DownloadStatus.Completed and not DownloadStatus.Downloading)
+            .Select(r => r.TaskId)
+            .ToList();
+        await DownloadManager.StartTasksAsync(ids);
+        _isError = false;
+        _message = $"Queued {ids.Count} file(s) for download.";
+        await Load();
+    }
+
+    private async Task PauseChat()
+    {
+        await DownloadManager.PauseChatAsync(ChatId);
+        _message = "Chat paused. Its downloads are held; other chats keep running.";
+        await Load();
+    }
+
+    private async Task ResumeChat()
+    {
+        await DownloadManager.ResumeChatAsync(ChatId);
+        _message = "Chat resumed.";
+        await Load();
+    }
+
+    private async Task ToggleMonitor(bool value)
+    {
+        if (_chat == null) return;
+        _chat.IsMonitored = value;
+        _chat.UpdatedAt = DateTime.UtcNow;
+        await Db.SaveChangesAsync();
+        if (!value)
+        {
+            var removed = await DownloadManager.PurgeChatAsync(ChatId);
+            _message = $"Unmonitored. Removed {removed} pending tasks.";
+        }
+    }
+
+    private async Task SetMediaType(MediaType type, bool enabled)
+    {
+        if (_chat == null) return;
+        switch (type)
+        {
+            case MediaType.Video: _chat.DownloadVideos = enabled; break;
+            case MediaType.Photo: _chat.DownloadPhotos = enabled; break;
+            case MediaType.Music: _chat.DownloadMusic = enabled; break;
+            case MediaType.File:  _chat.DownloadFiles  = enabled; break;
+        }
+        _chat.UpdatedAt = DateTime.UtcNow;
+        await Db.SaveChangesAsync();
+        if (!enabled)
+        {
+            var removed = await DownloadManager.PurgeChatAsync(ChatId, type);
+            _message = $"Disabled {type}. Removed {removed} pending {type} tasks.";
+        }
+    }
+
+    private async Task UpdateMinSize(int size)
+    {
+        if (_chat == null) return;
+        _chat.MinFileSizeMb = size;
+        _chat.UpdatedAt = DateTime.UtcNow;
+        await Db.SaveChangesAsync();
+    }
+
+    private async Task UpdateReaction(string emoji)
+    {
+        if (_chat == null) return;
+        _chat.ReactionIcon = emoji;
+        _chat.UpdatedAt = DateTime.UtcNow;
+        await Db.SaveChangesAsync();
+    }
+
+    private async Task ResetQueue()
+    {
+        var removed = await DownloadManager.PurgeChatAsync(ChatId);
+        _message = $"Reset queue. Removed {removed} pending tasks.";
+        _selected.Clear();
+        await Load();
+    }
+
+    private static string FormatSize(long bytes)
+    {
+        if (bytes <= 0) return "—";
+        if (bytes >= 1024L * 1024 * 1024) return $"{bytes / (1024.0 * 1024 * 1024):F1} GB";
+        if (bytes >= 1024 * 1024) return $"{bytes / (1024.0 * 1024):F1} MB";
+        return $"{bytes / 1024.0:F0} KB";
+    }
+
+    private string GetBadgeClass(MediaType type) => type switch
+    {
+        MediaType.Video => "badge-video",
+        MediaType.Photo => "badge-photo",
+        MediaType.Music => "badge-music",
+        _ => "badge-file"
+    };
+
+    private string GetStatusBadge(DownloadStatus status) => status switch
+    {
+        DownloadStatus.Completed => "badge-photo",
+        DownloadStatus.Failed => "badge-video",
+        DownloadStatus.Downloading => "badge-music",
+        _ => "badge-file"
+    };
+
+    private string GetTypeBadge(string type) => type switch
+    {
+        "Channel" => "badge-video",
+        "Group" => "badge-photo",
+        _ => "badge-file"
+    };
+
+    public void Dispose()
+    {
+        DownloadManager.OnStateChanged -= OnStateChanged;
+        TelegramClient.OnStatusMessage -= OnStatusMessage;
+        _refreshTimer?.Dispose();
+    }
+}

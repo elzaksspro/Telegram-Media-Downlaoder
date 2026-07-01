@@ -1,0 +1,372 @@
+@page "/chats"
+@using Microsoft.EntityFrameworkCore
+@using TelegramMedia.Core.Data
+@using TelegramMedia.Core.Enums
+@using TelegramMedia.Core.Interfaces
+@inject ITelegramClientService TelegramClient
+@inject IDownloadManager DownloadManager
+@inject AppDbContext Db
+@inject NavigationManager Nav
+
+<h1>Chat Management</h1>
+
+@if (TelegramClient.AuthState != AuthState.Authenticated)
+{
+    <div class="alert alert-warning">Please authenticate first on the Dashboard page.</div>
+}
+else
+{
+    <div class="card">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+            <h3>Telegram Chats</h3>
+            <div style="display: flex; gap: 8px;">
+                <button class="btn btn-success btn-sm" @onclick="DownloadAllMonitored"
+                        disabled="@(_isLoading || _isScanning)">
+                    @(_isScanning ? "Scanning..." : "Download All Monitored")
+                </button>
+                <button class="btn btn-primary btn-sm" @onclick="RefreshChats" disabled="@_isLoading">
+                    @(_isLoading ? "Refreshing..." : "Refresh Chats")
+                </button>
+            </div>
+        </div>
+
+        @if (!string.IsNullOrEmpty(_message))
+        {
+            <div class="alert alert-info">@_message</div>
+        }
+
+        <div style="display: flex; gap: 4px; margin-bottom: 12px; border-bottom: 1px solid var(--border);">
+            @foreach (var tab in _tabs)
+            {
+                <button class="btn btn-sm @(_activeTab == tab ? "btn-primary" : "btn-secondary")"
+                        style="border-radius: 4px 4px 0 0;"
+                        @onclick="() => _activeTab = tab">
+                    @tab (@CountForTab(tab))
+                </button>
+            }
+        </div>
+
+        <div class="search-box">
+            <input type="text" placeholder="Search chats..." @bind="_searchQuery" @bind:event="oninput" />
+        </div>
+
+        <div class="table-container">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Monitor</th>
+                        <th>Name</th>
+                        <th>Username</th>
+                        <th>Videos</th>
+                        <th>Photos</th>
+                        <th>Music</th>
+                        <th>Files</th>
+                        <th>Reaction</th>
+                        <th>Min MB</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var chat in FilteredChats)
+                    {
+                        <tr>
+                            <td>
+                                <input type="checkbox" checked="@chat.IsMonitored"
+                                    @onchange="e => ToggleMonitor(chat, (bool)e.Value!)" />
+                            </td>
+                            <td>
+                                <a href="/chats/@chat.TelegramChatId" style="color:var(--accent); font-weight:500;">@chat.Name</a>
+                            </td>
+                            <td style="color: var(--text-secondary);">@(chat.Username ?? "—")</td>
+                            <td>
+                                <input type="checkbox" checked="@chat.DownloadVideos"
+                                    @onchange="e => SetMediaType(chat, MediaType.Video, (bool)e.Value!)" />
+                            </td>
+                            <td>
+                                <input type="checkbox" checked="@chat.DownloadPhotos"
+                                    @onchange="e => SetMediaType(chat, MediaType.Photo, (bool)e.Value!)" />
+                            </td>
+                            <td>
+                                <input type="checkbox" checked="@chat.DownloadMusic"
+                                    @onchange="e => SetMediaType(chat, MediaType.Music, (bool)e.Value!)" />
+                            </td>
+                            <td>
+                                <input type="checkbox" checked="@chat.DownloadFiles"
+                                    @onchange="e => SetMediaType(chat, MediaType.File, (bool)e.Value!)" />
+                            </td>
+                            <td>
+                                <select class="form-control" style="width:70px; padding:4px 6px; font-size:0.85rem;"
+                                    value="@chat.ReactionIcon"
+                                    @onchange="e => UpdateReaction(chat, e.Value?.ToString() ?? string.Empty)">
+                                    <option value="">None</option>
+                                    <option value="👍">👍</option>
+                                    <option value="❤️">❤️</option>
+                                    <option value="🔥">🔥</option>
+                                    <option value="💯">💯</option>
+                                    <option value="👌">👌</option>
+                                </select>
+                            </td>
+                            <td>
+                                <input class="form-control" type="number" style="width:70px; padding:4px 6px;"
+                                    value="@chat.MinFileSizeMb"
+                                    @onchange="e => UpdateMinSize(chat, int.TryParse(e.Value?.ToString(), out var v) ? v : 0)" />
+                            </td>
+                            <td style="white-space: nowrap;">
+                                <button class="btn btn-success btn-sm"
+                                        style="margin-right:4px;"
+                                        disabled="@(_scanningChatId == chat.TelegramChatId || _isScanning)"
+                                        @onclick="() => ScanChat(chat)">
+                                    @(_scanningChatId == chat.TelegramChatId ? "Scanning..." : "Download")
+                                </button>
+                                @if (chat.IsMonitored)
+                                {
+                                    @if (chat.IsPaused)
+                                    {
+                                        <button class="btn btn-primary btn-sm" style="margin-right:4px;"
+                                                @onclick="() => ResumeChat(chat)">▶ Resume</button>
+                                    }
+                                    else
+                                    {
+                                        <button class="btn btn-secondary btn-sm" style="margin-right:4px;"
+                                                @onclick="() => PauseChat(chat)">⏸ Pause</button>
+                                    }
+                                }
+                                <button class="btn btn-secondary btn-sm"
+                                        style="margin-right:4px;"
+                                        @onclick="() => ViewDownloads(chat)">
+                                    Details
+                                </button>
+                                <button class="btn btn-danger btn-sm"
+                                        @onclick="() => ResetQueue(chat)">
+                                    Reset
+                                </button>
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+
+        @if (!_chats.Any())
+        {
+            <p style="color: var(--text-secondary); text-align: center; padding: 40px;">
+                Click "Refresh Chats" to load your Telegram chats.
+            </p>
+        }
+    </div>
+}
+
+@code {
+    private List<MonitoredChat> _chats = new();
+    private string _searchQuery = "";
+    private bool _isLoading;
+    private bool _isScanning;
+    private long? _scanningChatId;
+    private string? _message;
+
+    private readonly string[] _tabs = { "Monitored", "Channels", "Groups", "Users", "All" };
+    private string _activeTab = "Monitored";
+
+    private IEnumerable<MonitoredChat> FilteredChats
+    {
+        get
+        {
+            var q = _activeTab switch
+            {
+                "All" => _chats,
+                "Monitored" => _chats.Where(c => c.IsMonitored),
+                _ => _chats.Where(c => c.ChatType + "s" == _activeTab || c.ChatType == _activeTab.TrimEnd('s'))
+            };
+
+            if (!string.IsNullOrEmpty(_searchQuery))
+            {
+                q = q.Where(c =>
+                    c.Name.Contains(_searchQuery, StringComparison.OrdinalIgnoreCase) ||
+                    (c.Username?.Contains(_searchQuery, StringComparison.OrdinalIgnoreCase) ?? false));
+            }
+            return q;
+        }
+    }
+
+    private int CountForTab(string tab) => tab switch
+    {
+        "All" => _chats.Count,
+        "Monitored" => _chats.Count(c => c.IsMonitored),
+        _ => _chats.Count(c => c.ChatType + "s" == tab || c.ChatType == tab.TrimEnd('s'))
+    };
+
+    protected override async Task OnInitializedAsync()
+    {
+        _chats = await Db.MonitoredChats.OrderBy(c => c.ChatType).ThenBy(c => c.Name).ToListAsync();
+    }
+
+    private async Task RefreshChats()
+    {
+        _isLoading = true;
+        _message = "Fetching chats from Telegram...";
+        StateHasChanged();
+
+        try
+        {
+            var telegramChats = await TelegramClient.GetAllChatsAsync();
+            var existingIds = (await Db.MonitoredChats
+                .Select(c => c.TelegramChatId)
+                .ToListAsync())
+                .ToHashSet();
+
+            int newCount = 0;
+            foreach (var chat in telegramChats)
+            {
+                if (!existingIds.Contains(chat.TelegramChatId))
+                {
+                    Db.MonitoredChats.Add(chat);
+                    newCount++;
+                }
+                else
+                {
+                    var existing = await Db.MonitoredChats
+                        .FirstAsync(c => c.TelegramChatId == chat.TelegramChatId);
+                    existing.Name = chat.Name;
+                    existing.Username = chat.Username;
+                    existing.ChatType = chat.ChatType;
+                    existing.UpdatedAt = DateTime.UtcNow;
+                }
+            }
+
+            await Db.SaveChangesAsync();
+            _chats = await Db.MonitoredChats.OrderBy(c => c.ChatType).ThenBy(c => c.Name).ToListAsync();
+            _message = $"Loaded {telegramChats.Count} chats ({newCount} new).";
+        }
+        catch (Exception ex)
+        {
+            _message = $"Error: {ex.Message}";
+        }
+
+        _isLoading = false;
+    }
+
+    private async Task ToggleMonitor(MonitoredChat chat, bool value)
+    {
+        chat.IsMonitored = value;
+        chat.UpdatedAt = DateTime.UtcNow;
+        await Db.SaveChangesAsync();
+        if (!value)
+        {
+            var removed = await DownloadManager.PurgeChatAsync(chat.TelegramChatId);
+            if (removed > 0) _message = $"Unmonitored {chat.Name}. Removed {removed} pending tasks.";
+        }
+    }
+
+    private async Task SetMediaType(MonitoredChat chat, MediaType type, bool enabled)
+    {
+        switch (type)
+        {
+            case MediaType.Video: chat.DownloadVideos = enabled; break;
+            case MediaType.Photo: chat.DownloadPhotos = enabled; break;
+            case MediaType.Music: chat.DownloadMusic = enabled; break;
+            case MediaType.File:  chat.DownloadFiles  = enabled; break;
+        }
+        chat.UpdatedAt = DateTime.UtcNow;
+        await Db.SaveChangesAsync();
+        if (!enabled)
+        {
+            var removed = await DownloadManager.PurgeChatAsync(chat.TelegramChatId, type);
+            if (removed > 0) _message = $"{chat.Name}: disabled {type}, removed {removed} pending {type} tasks.";
+        }
+    }
+
+    private async Task ResetQueue(MonitoredChat chat)
+    {
+        var removed = await DownloadManager.PurgeChatAsync(chat.TelegramChatId);
+        _message = $"Reset queue for {chat.Name}: removed {removed} pending tasks.";
+    }
+
+    private async Task PauseChat(MonitoredChat chat)
+    {
+        await DownloadManager.PauseChatAsync(chat.TelegramChatId);
+        chat.IsPaused = true;
+        _message = $"Paused downloads for {chat.Name}. Other chats keep running.";
+        StateHasChanged();
+    }
+
+    private async Task ResumeChat(MonitoredChat chat)
+    {
+        await DownloadManager.ResumeChatAsync(chat.TelegramChatId);
+        chat.IsPaused = false;
+        _message = $"Resumed downloads for {chat.Name}.";
+        StateHasChanged();
+    }
+
+    private void ViewDownloads(MonitoredChat chat)
+        => Nav.NavigateTo($"/chats/{chat.TelegramChatId}");
+
+    private async Task UpdateReaction(MonitoredChat chat, string emoji)
+    {
+        chat.ReactionIcon = emoji;
+        chat.UpdatedAt = DateTime.UtcNow;
+        await Db.SaveChangesAsync();
+    }
+
+    private async Task UpdateMinSize(MonitoredChat chat, int size)
+    {
+        chat.MinFileSizeMb = size;
+        chat.UpdatedAt = DateTime.UtcNow;
+        await Db.SaveChangesAsync();
+    }
+
+    private async Task ScanChat(MonitoredChat chat)
+    {
+        _scanningChatId = chat.TelegramChatId;
+        _message = $"Scanning {chat.Name}...";
+        StateHasChanged();
+        try
+        {
+            var (scanned, queued) = await TelegramClient.ScanAndEnqueueHistoryAsync(
+                chat.TelegramChatId, CancellationToken.None);
+            _message = $"{chat.Name}: queued {queued} media from {scanned} messages.";
+        }
+        catch (Exception ex)
+        {
+            _message = $"Scan failed for {chat.Name}: {ex.Message}";
+        }
+        finally
+        {
+            _scanningChatId = null;
+            StateHasChanged();
+        }
+    }
+
+    private async Task DownloadAllMonitored()
+    {
+        _isScanning = true;
+        var targets = _chats.Where(c => c.IsMonitored).ToList();
+        int totalQueued = 0, totalScanned = 0;
+        try
+        {
+            foreach (var chat in targets)
+            {
+                _scanningChatId = chat.TelegramChatId;
+                _message = $"Scanning {chat.Name} ({targets.IndexOf(chat) + 1}/{targets.Count})...";
+                StateHasChanged();
+                try
+                {
+                    var (scanned, queued) = await TelegramClient.ScanAndEnqueueHistoryAsync(
+                        chat.TelegramChatId, CancellationToken.None);
+                    totalScanned += scanned;
+                    totalQueued += queued;
+                }
+                catch (Exception ex)
+                {
+                    _message = $"Error on {chat.Name}: {ex.Message}";
+                }
+            }
+            _message = $"Done. Queued {totalQueued} media from {totalScanned} messages across {targets.Count} chats.";
+        }
+        finally
+        {
+            _isScanning = false;
+            _scanningChatId = null;
+            StateHasChanged();
+        }
+    }
+}

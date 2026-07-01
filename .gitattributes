@@ -1,0 +1,5 @@
+# Normalize line endings; keep binary assets untouched.
+* text=auto
+*.ico binary
+*.png binary
+*.jpg binary

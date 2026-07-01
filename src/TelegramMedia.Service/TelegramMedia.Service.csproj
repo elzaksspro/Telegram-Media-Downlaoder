@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <OutputType>WinExe</OutputType>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>TelegramMedia.Service</RootNamespace>
+    <ApplicationIcon>app.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <!-- WinForms is only used by the tray host; keep it out of the global usings so the
+       Blazor pages' `Timer` keeps meaning System.Threading.Timer. The two desktop
+       files (Program.cs, PortInputDialog.cs) import System.Windows.Forms explicitly. -->
+  <ItemGroup>
+    <Using Remove="System.Windows.Forms" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.*" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\TelegramMedia.Core\TelegramMedia.Core.csproj" />
+    <ProjectReference Include="..\TelegramMedia.Telegram\TelegramMedia.Telegram.csproj" />
+  </ItemGroup>
+
+</Project>

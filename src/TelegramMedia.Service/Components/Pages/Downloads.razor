@@ -1,0 +1,292 @@
+@page "/downloads"
+@using Microsoft.AspNetCore.WebUtilities
+@using Microsoft.EntityFrameworkCore
+@using TelegramMedia.Core.Data
+@using TelegramMedia.Core.Interfaces
+@inject IDownloadManager DownloadManager
+@inject ITelegramClientService TelegramClient
+@inject AppDbContext Db
+@inject NavigationManager Nav
+@implements IDisposable
+
+<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+    <h1>Downloads @(_chatFilterName != null ? $"— {_chatFilterName}" : "")</h1>
+    <div style="display: flex; gap: 8px; align-items: center;">
+        @if (_chatIdFilter.HasValue)
+        {
+            <button class="btn btn-secondary btn-sm" @onclick='() => Nav.NavigateTo("/downloads")'>Show All</button>
+        }
+        @if (DownloadManager.IsPaused)
+        {
+            <span class="badge badge-video">Paused</span>
+            <button class="btn btn-primary btn-sm" @onclick="Resume">▶ Resume</button>
+        }
+        else
+        {
+            <button class="btn btn-secondary btn-sm" @onclick="Pause">⏸ Pause</button>
+        }
+    </div>
+</div>
+
+<!-- Queue controls -->
+<div class="card" style="margin-bottom: 16px;">
+    <div style="display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-end;">
+        <div>
+            <label style="display:block; font-size:0.85rem; color:var(--text-secondary); margin-bottom:4px;">
+                Concurrent downloads
+            </label>
+            <input type="number" min="1" max="32" class="form-control" style="width: 110px; padding: 6px;"
+                   value="@_maxConcurrent" @onchange="OnConcurrencyChanged" />
+        </div>
+        <div>
+            <label style="display:block; font-size:0.85rem; color:var(--text-secondary); margin-bottom:4px;">
+                Speed limit (KB/s, 0 = unlimited)
+            </label>
+            <input type="number" min="0" step="128" class="form-control" style="width: 160px; padding: 6px;"
+                   value="@_bandwidthKbps" @onchange="OnBandwidthChanged" />
+        </div>
+        <div style="color: var(--text-secondary); font-size: 0.85rem;">
+            @(_bandwidthKbps <= 0 ? "Unlimited speed" : $"Capped at {_bandwidthKbps} KB/s")
+            &middot; up to @_maxConcurrent at once
+        </div>
+    </div>
+</div>
+
+<!-- Active Downloads -->
+<div class="card">
+    <h3>Active Downloads (@_activeDownloads.Count)</h3>
+
+    @if (_activeDownloads.Any())
+    {
+        @foreach (var dl in _activeDownloads)
+        {
+            <div class="download-item">
+                <span class="badge @GetBadgeClass(dl.MediaType)">@dl.MediaType</span>
+                <div class="info">
+                    <div class="name">@dl.FileName</div>
+                    <div class="meta">@dl.ChatName &middot; @dl.SizeDisplay</div>
+                    <div class="progress-bar" style="margin-top: 6px;">
+                        <div class="fill @(dl.Status == DownloadStatus.Completed ? "complete" : "")"
+                             style="width: @dl.ProgressPercent.ToString("F0")%"></div>
+                    </div>
+                </div>
+                <div class="speed">@dl.SpeedDisplay</div>
+                <span class="badge" style="min-width:60px; text-align:center;">
+                    @dl.ProgressPercent.ToString("F0")%
+                </span>
+            </div>
+        }
+    }
+    else
+    {
+        <p style="color: var(--text-secondary);">No active downloads.</p>
+    }
+</div>
+
+<!-- Download History -->
+<div class="card">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+        <h3>History</h3>
+        <div style="display: flex; gap: 8px; align-items: center;">
+            <select class="form-control" style="width: 120px; padding: 6px;" @bind="_statusFilter">
+                <option value="">All</option>
+                <option value="Completed">Completed</option>
+                <option value="Failed">Failed</option>
+                <option value="Skipped">Skipped</option>
+            </select>
+            @if (_historyTasks.Any(t => t.Status == DownloadStatus.Failed))
+            {
+                <button class="btn btn-danger btn-sm" @onclick="ClearFailed">Clear Failed</button>
+            }
+        </div>
+    </div>
+
+    <div class="table-container">
+        <table>
+            <thead>
+                <tr>
+                    <th>Type</th>
+                    <th>File Name</th>
+                    <th>Chat</th>
+                    <th>Size</th>
+                    <th>Status</th>
+                    <th>Date</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var task in FilteredHistory)
+                {
+                    <tr>
+                        <td><span class="badge @GetBadgeClass(task.MediaType)">@task.MediaType</span></td>
+                        <td style="max-width:300px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
+                            @task.FileName
+                        </td>
+                        <td>@task.ChatName</td>
+                        <td>@FormatSize(task.FileSize)</td>
+                        <td>
+                            <span class="badge @GetStatusBadge(task.Status)">@task.Status</span>
+                        </td>
+                        <td style="color: var(--text-secondary); font-size: 0.85rem;">
+                            @(task.CompletedAt?.ToString("MMM dd HH:mm") ?? task.CreatedAt.ToString("MMM dd HH:mm"))
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+
+    @if (!_historyTasks.Any())
+    {
+        <p style="color: var(--text-secondary); text-align: center; padding: 20px;">No download history yet.</p>
+    }
+</div>
+
+@code {
+    private List<DownloadProgress> _activeDownloads = new();
+    private List<DownloadTask> _historyTasks = new();
+    private string _statusFilter = "";
+    private Timer? _refreshTimer;
+    private long? _chatIdFilter;
+    private string? _chatFilterName;
+    private int _maxConcurrent = 3;
+    private int _bandwidthKbps;
+
+    private IEnumerable<DownloadTask> FilteredHistory => string.IsNullOrEmpty(_statusFilter)
+        ? _historyTasks
+        : _historyTasks.Where(t => t.Status.ToString() == _statusFilter);
+
+    protected override async Task OnInitializedAsync()
+    {
+        ReadChatFilter();
+        Nav.LocationChanged += (_, _) => { ReadChatFilter(); InvokeAsync(LoadDataAsync); };
+        await LoadDataAsync();
+
+        // Seed the control values from persisted settings; fall back to live manager state.
+        var settings = await Db.Settings.AsNoTracking().FirstOrDefaultAsync();
+        _maxConcurrent = settings?.MaxConcurrentDownloads > 0 ? settings.MaxConcurrentDownloads : DownloadManager.MaxConcurrent;
+        _bandwidthKbps = settings?.MaxSpeedKbps ?? DownloadManager.BandwidthLimitKbps;
+
+        DownloadManager.OnStateChanged += OnStateChanged;
+        TelegramClient.OnDownloadProgress += OnProgress;
+        _refreshTimer = new Timer(_ => InvokeAsync(LoadDataAsync), null, 0, 3000);
+    }
+
+    private async Task Pause() => await DownloadManager.PauseAllAsync();
+    private async Task Resume() => await DownloadManager.ResumeAllAsync();
+
+    private async Task OnConcurrencyChanged(ChangeEventArgs e)
+    {
+        if (int.TryParse(e.Value?.ToString(), out var v))
+        {
+            _maxConcurrent = Math.Clamp(v, 1, 32);
+            await DownloadManager.SetMaxConcurrentAsync(_maxConcurrent);
+        }
+    }
+
+    private async Task OnBandwidthChanged(ChangeEventArgs e)
+    {
+        if (int.TryParse(e.Value?.ToString(), out var v))
+        {
+            _bandwidthKbps = Math.Max(0, v);
+            await DownloadManager.SetBandwidthLimitAsync(_bandwidthKbps);
+        }
+    }
+
+    private void ReadChatFilter()
+    {
+        var uri = Nav.ToAbsoluteUri(Nav.Uri);
+        var qs = QueryHelpers.ParseQuery(uri.Query);
+        if (qs.TryGetValue("chatId", out var v) && long.TryParse(v, out var id))
+        {
+            _chatIdFilter = id;
+            _chatFilterName = Db.MonitoredChats
+                .Where(c => c.TelegramChatId == id)
+                .Select(c => c.Name)
+                .FirstOrDefault();
+        }
+        else
+        {
+            _chatIdFilter = null;
+            _chatFilterName = null;
+        }
+    }
+
+    private async Task LoadDataAsync()
+    {
+        _activeDownloads = DownloadManager.ActiveDownloads
+            .Where(d => !_chatIdFilter.HasValue || _historyTasks.Any(t => t.Id == d.TaskId && t.TelegramChatId == _chatIdFilter))
+            .ToList();
+
+        var q = Db.DownloadTasks.AsQueryable();
+        if (_chatIdFilter.HasValue) q = q.Where(t => t.TelegramChatId == _chatIdFilter.Value);
+
+        _historyTasks = await q.OrderByDescending(t => t.CreatedAt).Take(200).ToListAsync();
+
+        // re-filter active using freshly loaded history
+        if (_chatIdFilter.HasValue)
+        {
+            var taskIds = _historyTasks.Select(t => t.Id).ToHashSet();
+            _activeDownloads = DownloadManager.ActiveDownloads
+                .Where(d => taskIds.Contains(d.TaskId))
+                .ToList();
+        }
+
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private void OnStateChanged() => InvokeAsync(LoadDataAsync);
+
+    private void OnProgress(DownloadProgress progress)
+    {
+        var existing = _activeDownloads.FirstOrDefault(d => d.TaskId == progress.TaskId);
+        if (existing != null)
+        {
+            existing.DownloadedBytes = progress.DownloadedBytes;
+            existing.FileSize = progress.FileSize;
+            existing.SpeedKbps = progress.SpeedKbps;
+            existing.Status = progress.Status;
+        }
+        InvokeAsync(StateHasChanged);
+    }
+
+    private async Task ClearFailed()
+    {
+        var q = Db.DownloadTasks.Where(t => t.Status == DownloadStatus.Failed);
+        if (_chatIdFilter.HasValue) q = q.Where(t => t.TelegramChatId == _chatIdFilter.Value);
+        var failed = await q.ToListAsync();
+        Db.DownloadTasks.RemoveRange(failed);
+        await Db.SaveChangesAsync();
+        await LoadDataAsync();
+    }
+
+    private string FormatSize(long bytes)
+    {
+        if (bytes <= 0) return "—";
+        if (bytes >= 1024 * 1024 * 1024) return $"{bytes / (1024.0 * 1024 * 1024):F1} GB";
+        if (bytes >= 1024 * 1024) return $"{bytes / (1024.0 * 1024):F1} MB";
+        return $"{bytes / 1024.0:F0} KB";
+    }
+
+    private string GetBadgeClass(MediaType type) => type switch
+    {
+        MediaType.Video => "badge-video",
+        MediaType.Photo => "badge-photo",
+        MediaType.Music => "badge-music",
+        _ => "badge-file"
+    };
+
+    private string GetStatusBadge(DownloadStatus status) => status switch
+    {
+        DownloadStatus.Completed => "badge-photo",
+        DownloadStatus.Failed => "badge-video",
+        DownloadStatus.Downloading => "badge-music",
+        _ => "badge-file"
+    };
+
+    public void Dispose()
+    {
+        DownloadManager.OnStateChanged -= OnStateChanged;
+        TelegramClient.OnDownloadProgress -= OnProgress;
+        _refreshTimer?.Dispose();
+    }
+}

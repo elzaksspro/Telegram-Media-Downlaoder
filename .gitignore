@@ -1,0 +1,12 @@
+bin/
+obj/
+publish/
+output/
+*.user
+*.suo
+.vs/
+*.db
+session.dat
+.env
+.claude/
+.vscode/

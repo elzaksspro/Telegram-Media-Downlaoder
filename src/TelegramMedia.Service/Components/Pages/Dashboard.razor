@@ -1,0 +1,522 @@
+@page "/"
+@using Microsoft.EntityFrameworkCore
+@using TelegramMedia.Core.Data
+@using TelegramMedia.Core.Interfaces
+@inject ITelegramClientService TelegramClient
+@inject IDownloadManager DownloadManager
+@inject AppDbContext Db
+@implements IDisposable
+
+@if (_authStep != "done" && TelegramClient.AuthState != AuthState.Authenticated)
+{
+    <div class="auth-card">
+        <div class="auth-icon" style="background:none;">
+            <img src="logo.svg" alt="Telegram Media Downloader" width="64" height="64" />
+        </div>
+        <h3>Telegram Media Downloader</h3>
+        <p class="auth-subtitle">Connect your Telegram account to start auto-downloading media.</p>
+
+        @if (!string.IsNullOrEmpty(_statusMessage))
+        {
+            <div class="alert @(_statusMessage.Contains("failed") || _statusMessage.Contains("Error") ? "alert-danger" : "alert-info")">
+                @_statusMessage
+            </div>
+        }
+
+        @if (_authStep == "credentials")
+        {
+            <div class="auth-step">
+                <span class="step-num">1</span>
+                Enter your Telegram API credentials and phone number
+            </div>
+            <div class="form-group">
+                <label>API ID</label>
+                <input class="form-control" type="number" @bind="_apiId" placeholder="e.g. 12345678" />
+            </div>
+            <div class="form-group">
+                <label>API Hash</label>
+                <input class="form-control" type="text" @bind="_apiHash" placeholder="e.g. 0123456789abcdef..." />
+            </div>
+            <div class="form-group">
+                <label>Phone Number</label>
+                <input class="form-control" type="tel" @bind="_phoneNumber" placeholder="+234 801 234 5678" />
+            </div>
+            <button class="btn btn-primary" @onclick="SendCode" disabled="@_isLoading">
+                @if (_isLoading)
+                {
+                    <span>Sending...</span>
+                }
+                else
+                {
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                    <span>Send Verification Code</span>
+                }
+            </button>
+        }
+        else if (_authStep == "code")
+        {
+            <div class="auth-step">
+                <span class="step-num">2</span>
+                Enter the verification code sent to your Telegram app
+            </div>
+            <div class="form-group">
+                <label>Verification Code</label>
+                <input class="form-control" type="text" @bind="_code" placeholder="12345" style="text-align:center; font-size:1.4rem; letter-spacing:8px; font-weight:700;" />
+            </div>
+            <button class="btn btn-primary" @onclick="SubmitCode" disabled="@_isLoading">
+                @(_isLoading ? "Verifying..." : "Verify Code")
+            </button>
+            <button class="btn btn-secondary" style="width:100%; margin-top:8px;" @onclick="GoBack">
+                Back
+            </button>
+        }
+        else if (_authStep == "password")
+        {
+            <div class="auth-step">
+                <span class="step-num">3</span>
+                Enter your two-factor authentication password
+            </div>
+            <div class="form-group">
+                <label>2FA Password</label>
+                <input class="form-control" type="password" @bind="_password" placeholder="Your 2FA password" />
+            </div>
+            <button class="btn btn-primary" @onclick="SubmitPassword" disabled="@_isLoading">
+                @(_isLoading ? "Authenticating..." : "Submit Password")
+            </button>
+        }
+
+        <p style="text-align:center; margin-top:20px; font-size:0.8rem; color:var(--text-muted);">
+            Get API credentials from
+            <a href="https://my.telegram.org/apps" target="_blank">my.telegram.org/apps</a>
+        </p>
+    </div>
+}
+else
+{
+    <h1>Dashboard</h1>
+
+    <!-- Stats -->
+    <div class="stats-grid">
+        <div class="stat-card">
+            <div class="label">Monitored Chats</div>
+            <div class="value accent">@_monitoredCount</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">Total Downloads</div>
+            <div class="value success">@_completedCount</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">Active Downloads</div>
+            <div class="value warning">@_activeCount</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">Status</div>
+            <div class="value success" style="font-size:1.1rem;">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" style="vertical-align:middle; margin-right:4px;"><circle cx="12" cy="12" r="6"/></svg>
+                Monitoring
+            </div>
+        </div>
+    </div>
+
+    <!-- Active Downloads, grouped by chat -->
+    <div class="card">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+            <h3>
+                <span class="card-icon" style="background:var(--warning-bg); color:var(--warning);">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+                </span>
+                Active Downloads (@_activeTotal across @_chatGroups.Count chats)
+            </h3>
+            @if (_activeTotal > 0)
+            {
+                <div style="display:flex; gap:8px;">
+                    <button class="btn btn-secondary btn-sm" @onclick="() => DownloadManager.PauseAllAsync()">Pause All</button>
+                    <button class="btn btn-primary btn-sm" @onclick="() => DownloadManager.ResumeAllAsync()">Resume All</button>
+                </div>
+            }
+        </div>
+        @if (_chatGroups.Any())
+        {
+            <div class="table-container" style="margin-top:12px;">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Chat</th>
+                            <th>Type</th>
+                            <th>Downloading</th>
+                            <th>Queued</th>
+                            <th>Paused</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var g in _chatGroups)
+                        {
+                            <tr>
+                                <td>
+                                    <a href="/chats/@g.TelegramChatId" style="color:var(--accent); font-weight:500;">@g.ChatName</a>
+                                </td>
+                                <td><span class="badge @GetTypeBadge(g.ChatType)">@g.ChatType</span></td>
+                                <td>@(g.Downloading > 0 ? g.Downloading.ToString() : "—")</td>
+                                <td>@(g.Queued > 0 ? g.Queued.ToString() : "—")</td>
+                                <td>@(g.Paused > 0 ? g.Paused.ToString() : "—")</td>
+                                <td style="text-align:right;">
+                                    <a class="btn btn-secondary btn-sm" href="/chats/@g.TelegramChatId">View</a>
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+        else
+        {
+            <p style="color:var(--text-secondary); margin:8px 0;">No active downloads.</p>
+        }
+    </div>
+
+    <!-- Recent Downloads (history) -->
+    <div class="card">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+            <h3>
+                <span class="card-icon" style="background:var(--accent-glow); color:var(--accent);">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 8v4l3 3"/><circle cx="12" cy="12" r="10"/></svg>
+                </span>
+                Recent Downloads
+            </h3>
+            <div style="display:flex; gap:8px; align-items:center;">
+                <select class="form-control" style="width:120px; padding:6px;" @bind="_statusFilter">
+                    <option value="">All</option>
+                    <option value="Completed">Completed</option>
+                    <option value="Failed">Failed</option>
+                    <option value="Skipped">Skipped</option>
+                </select>
+                @if (_recentDownloads.Any(t => t.Status == DownloadStatus.Failed))
+                {
+                    <button class="btn btn-danger btn-sm" @onclick="ClearFailed">Clear Failed</button>
+                }
+            </div>
+        </div>
+        @if (FilteredRecent.Any())
+        {
+            <div class="table-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Type</th>
+                            <th>File Name</th>
+                            <th>Chat</th>
+                            <th>Size</th>
+                            <th>Status</th>
+                            <th>Date</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var task in FilteredRecent)
+                        {
+                            <tr>
+                                <td><span class="badge @GetBadgeClass(task.MediaType)">@task.MediaType</span></td>
+                                <td style="max-width:300px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">@task.FileName</td>
+                                <td>
+                                    <a href="/chats/@task.TelegramChatId" style="color:var(--accent);">@task.ChatName</a>
+                                </td>
+                                <td>@FormatSize(task.FileSize)</td>
+                                <td><span class="badge @GetStatusBadge(task.Status)">@task.Status</span></td>
+                                <td style="color:var(--text-secondary); font-size:0.85rem;">
+                                    @(task.CompletedAt?.ToString("MMM dd HH:mm") ?? task.CreatedAt.ToString("MMM dd HH:mm"))
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+        else
+        {
+            <div class="empty-state">
+                <p>No downloads yet.<br/>Go to <a href="/chats">Chats</a> to select channels to monitor.</p>
+            </div>
+        }
+    </div>
+
+    <!-- Activity Log -->
+    <div class="card">
+        <h3>
+            <span class="card-icon" style="background:var(--warning-bg); color:var(--warning);">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+            </span>
+            Activity Log
+        </h3>
+        <div class="activity-log">
+            @foreach (var msg in _statusMessages.TakeLast(20).Reverse())
+            {
+                <div class="log-entry">@msg</div>
+            }
+            @if (!_statusMessages.Any())
+            {
+                <div class="empty-state" style="padding:20px;">
+                    <p style="color:var(--text-muted);">Waiting for activity...</p>
+                </div>
+            }
+        </div>
+    </div>
+}
+
+@code {
+    private string _phoneNumber = "";
+    private string _code = "";
+    private string _password = "";
+    private int _apiId;
+    private string _apiHash = "";
+    private string? _statusMessage;
+    private bool _isLoading;
+    // Track auth step locally so UI transitions work even before TelegramClient state updates
+    private string _authStep = "credentials"; // credentials, code, password, done
+
+    private int _monitoredCount;
+    private int _completedCount;
+    private int _activeCount;
+    private int _activeTotal;
+    private List<DownloadTask> _recentDownloads = new();
+    private List<ChatActivity> _chatGroups = new();
+    private string _statusFilter = "";
+    private List<string> _statusMessages = new();
+    private Timer? _authPollTimer;
+    private Timer? _refreshTimer;
+
+    private record ChatActivity(long TelegramChatId, string ChatName, string ChatType,
+        int Downloading, int Queued, int Paused);
+
+    private IEnumerable<DownloadTask> FilteredRecent => string.IsNullOrEmpty(_statusFilter)
+        ? _recentDownloads
+        : _recentDownloads.Where(t => t.Status.ToString() == _statusFilter);
+
+    protected override async Task OnInitializedAsync()
+    {
+        var settings = await Db.Settings.FirstOrDefaultAsync();
+        if (settings != null)
+        {
+            _apiId = settings.ApiId;
+            _apiHash = settings.ApiHash;
+        }
+
+        TelegramClient.OnStatusMessage += OnStatus;
+        DownloadManager.OnStateChanged += OnDownloadStateChanged;
+
+        // Poll auth state changes from the background login flow
+        _authPollTimer = new Timer(_ =>
+        {
+            var newStep = TelegramClient.AuthState switch
+            {
+                AuthState.Authenticated => "done",
+                AuthState.WaitingForCode => "code",
+                AuthState.WaitingForPassword => "password",
+                _ => _authStep
+            };
+            if (newStep != _authStep)
+            {
+                _authStep = newStep;
+                InvokeAsync(StateHasChanged);
+            }
+        }, null, 0, 1000);
+
+        _refreshTimer = new Timer(_ => InvokeAsync(LoadStatsAsync), null, 3000, 3000);
+
+        await LoadStatsAsync();
+    }
+
+    private void OnDownloadStateChanged() => InvokeAsync(LoadStatsAsync);
+
+    private async Task LoadStatsAsync()
+    {
+        _monitoredCount = await Db.MonitoredChats.CountAsync(c => c.IsMonitored);
+        _completedCount = await Db.DownloadTasks.CountAsync(t => t.Status == DownloadStatus.Completed);
+
+        var active = new[] { DownloadStatus.Queued, DownloadStatus.Downloading, DownloadStatus.Paused };
+        var activeGroups = await Db.DownloadTasks
+            .Where(t => active.Contains(t.Status))
+            .GroupBy(t => new { t.TelegramChatId, t.ChatName })
+            .Select(g => new {
+                g.Key.TelegramChatId,
+                g.Key.ChatName,
+                Downloading = g.Count(t => t.Status == DownloadStatus.Downloading),
+                Queued = g.Count(t => t.Status == DownloadStatus.Queued),
+                Paused = g.Count(t => t.Status == DownloadStatus.Paused),
+            })
+            .ToListAsync();
+
+        var chatTypes = await Db.MonitoredChats
+            .Where(c => activeGroups.Select(g => g.TelegramChatId).Contains(c.TelegramChatId))
+            .ToDictionaryAsync(c => c.TelegramChatId, c => c.ChatType);
+
+        _chatGroups = activeGroups
+            .Select(g => new ChatActivity(
+                g.TelegramChatId,
+                g.ChatName,
+                chatTypes.GetValueOrDefault(g.TelegramChatId, "Unknown"),
+                g.Downloading, g.Queued, g.Paused))
+            .OrderByDescending(g => g.Downloading + g.Queued + g.Paused)
+            .ToList();
+        _activeTotal = _chatGroups.Sum(g => g.Downloading + g.Queued + g.Paused);
+        _activeCount = _chatGroups.Sum(g => g.Downloading);
+
+        _recentDownloads = await Db.DownloadTasks
+            .Where(t => t.Status != DownloadStatus.Queued && t.Status != DownloadStatus.Downloading)
+            .OrderByDescending(t => t.CreatedAt)
+            .Take(50)
+            .ToListAsync();
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task ClearFailed()
+    {
+        var failed = await Db.DownloadTasks
+            .Where(t => t.Status == DownloadStatus.Failed)
+            .ToListAsync();
+        Db.DownloadTasks.RemoveRange(failed);
+        await Db.SaveChangesAsync();
+        await LoadStatsAsync();
+    }
+
+    private static string FormatSize(long bytes)
+    {
+        if (bytes <= 0) return "—";
+        if (bytes >= 1024L * 1024 * 1024) return $"{bytes / (1024.0 * 1024 * 1024):F1} GB";
+        if (bytes >= 1024 * 1024) return $"{bytes / (1024.0 * 1024):F1} MB";
+        return $"{bytes / 1024.0:F0} KB";
+    }
+
+    private async Task SendCode()
+    {
+        _isLoading = true;
+        _statusMessage = null;
+        try
+        {
+            var settings = await Db.Settings.FirstAsync();
+            settings.ApiId = _apiId;
+            settings.ApiHash = _apiHash;
+            await Db.SaveChangesAsync();
+
+            await TelegramClient.ConnectAsync(_apiId, _apiHash);
+
+            if (TelegramClient.AuthState == AuthState.Authenticated)
+            {
+                _statusMessage = "Already authenticated!";
+                await LoadStatsAsync();
+            }
+            else
+            {
+                await TelegramClient.SendCodeAsync(_phoneNumber);
+                _statusMessage = "Verification code sent to your Telegram app.";
+                _authStep = "code"; // Immediately show code input
+            }
+        }
+        catch (Exception ex)
+        {
+            _statusMessage = $"Error: {ex.Message}";
+        }
+        _isLoading = false;
+    }
+
+    private async Task SubmitCode()
+    {
+        _isLoading = true;
+        try
+        {
+            await TelegramClient.SubmitCodeAsync(_code);
+            _statusMessage = "Code submitted. Waiting for authentication...";
+
+            // Poll for auth state change (up to 10 seconds)
+            for (int i = 0; i < 20; i++)
+            {
+                await Task.Delay(500);
+                if (TelegramClient.AuthState == AuthState.Authenticated)
+                {
+                    _authStep = "done";
+                    await LoadStatsAsync();
+                    break;
+                }
+                if (TelegramClient.AuthState == AuthState.WaitingForPassword)
+                {
+                    _authStep = "password";
+                    _statusMessage = "2FA password required.";
+                    break;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _statusMessage = $"Error: {ex.Message}";
+        }
+        _isLoading = false;
+    }
+
+    private async Task SubmitPassword()
+    {
+        _isLoading = true;
+        try
+        {
+            await TelegramClient.SubmitPasswordAsync(_password);
+            _statusMessage = "Password submitted. Waiting...";
+
+            for (int i = 0; i < 20; i++)
+            {
+                await Task.Delay(500);
+                if (TelegramClient.AuthState == AuthState.Authenticated)
+                {
+                    _authStep = "done";
+                    await LoadStatsAsync();
+                    break;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _statusMessage = $"Error: {ex.Message}";
+        }
+        _isLoading = false;
+    }
+
+    private void GoBack()
+    {
+        _authStep = "credentials";
+        _statusMessage = null;
+    }
+
+    private void OnStatus(string message)
+    {
+        _statusMessages.Add($"[{DateTime.Now:HH:mm:ss}] {message}");
+        InvokeAsync(StateHasChanged);
+    }
+
+    private string GetBadgeClass(MediaType type) => type switch
+    {
+        MediaType.Video => "badge-video",
+        MediaType.Photo => "badge-photo",
+        MediaType.Music => "badge-music",
+        _ => "badge-file"
+    };
+
+    private string GetStatusBadge(DownloadStatus status) => status switch
+    {
+        DownloadStatus.Completed => "badge-photo",
+        DownloadStatus.Failed => "badge-video",
+        _ => "badge-file"
+    };
+
+    private string GetTypeBadge(string type) => type switch
+    {
+        "Channel" => "badge-video",
+        "Group" => "badge-photo",
+        "User" => "badge-music",
+        _ => "badge-file"
+    };
+
+    public void Dispose()
+    {
+        TelegramClient.OnStatusMessage -= OnStatus;
+        DownloadManager.OnStateChanged -= OnDownloadStateChanged;
+        _authPollTimer?.Dispose();
+        _refreshTimer?.Dispose();
+    }
+}

@@ -1,0 +1,158 @@
+@page "/settings"
+@using Microsoft.EntityFrameworkCore
+@using TelegramMedia.Core.Data
+@using TelegramMedia.Core.Interfaces
+@inject AppDbContext Db
+@inject ITelegramClientService TelegramClient
+@inject IDownloadManager DownloadManager
+
+<h1>Settings</h1>
+
+@if (_settings == null)
+{
+    <p>Loading...</p>
+}
+else
+{
+    @if (!string.IsNullOrEmpty(_message))
+    {
+        <div class="alert @(_isError ? "alert-danger" : "alert-success")">@_message</div>
+    }
+
+    <!-- API Credentials -->
+    <div class="card">
+        <h3>Telegram API Credentials</h3>
+        <p style="font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 16px;">
+            Get your credentials from <a href="https://my.telegram.org/apps" target="_blank" style="color: var(--accent);">my.telegram.org/apps</a>
+        </p>
+        <div class="inline-form">
+            <div class="form-group">
+                <label>API ID</label>
+                <input class="form-control" type="number" @bind="_settings.ApiId" />
+            </div>
+            <div class="form-group">
+                <label>API Hash</label>
+                <input class="form-control" type="text" @bind="_settings.ApiHash" />
+            </div>
+        </div>
+    </div>
+
+    <!-- Download Settings -->
+    <div class="card">
+        <h3>Download Settings</h3>
+        <div class="form-group">
+            <label>Download Path</label>
+            <input class="form-control" type="text" @bind="_settings.DownloadPath" />
+        </div>
+        <div class="form-group">
+            <label>Path Template</label>
+            <input class="form-control" type="text" @bind="_settings.PathTemplate" />
+            <small style="color: var(--text-secondary); font-size: 0.8rem;">
+                Variables: {"{chatType}"}, {"{chatName}"}, {"{mediaType}"}, {"{year}"}, {"{month}"}, {"{day}"}
+                — default <code>{"{chatType}"}s/{"{chatName}"}/{"{mediaType}"}</code> groups files by channel/group/user.
+            </small>
+        </div>
+        <div class="inline-form">
+            <div class="form-group">
+                <label>Max Concurrent Downloads</label>
+                <input class="form-control" type="number" min="1" max="10" @bind="_settings.MaxConcurrentDownloads" />
+            </div>
+            <div class="form-group">
+                <label>Max Speed (KB/s, 0 = unlimited)</label>
+                <input class="form-control" type="number" min="0" @bind="_settings.MaxSpeedKbps" />
+            </div>
+        </div>
+    </div>
+
+    <!-- Notification Settings -->
+    <div class="card">
+        <h3>Telegram Notifications</h3>
+        <p style="font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 16px;">
+            Send download notifications to a Telegram chat via bot.
+        </p>
+        <div class="toggle-item" style="margin-bottom: 12px;">
+            <input type="checkbox" @bind="_settings.SendNotifications" />
+            <label>Enable Notifications</label>
+        </div>
+        @if (_settings.SendNotifications)
+        {
+            <div class="inline-form">
+                <div class="form-group">
+                    <label>Bot Token</label>
+                    <input class="form-control" type="text" @bind="_settings.NotificationBotToken"
+                           placeholder="123456:ABC-DEF1234..." />
+                </div>
+                <div class="form-group">
+                    <label>Chat ID</label>
+                    <input class="form-control" type="text" @bind="_settings.NotificationChatId"
+                           placeholder="-1001234567890" />
+                </div>
+            </div>
+        }
+    </div>
+
+    <!-- Web UI Settings -->
+    <div class="card">
+        <h3>Web UI</h3>
+        <div class="form-group">
+            <label>Web Port</label>
+            <input class="form-control" type="number" @bind="_settings.WebPort" style="width: 120px;" />
+            <small style="color: var(--text-secondary); font-size: 0.8rem;">
+                Restart required after changing port.
+            </small>
+        </div>
+    </div>
+
+    <!-- Actions -->
+    <div style="display: flex; gap: 12px; margin-top: 20px;">
+        <button class="btn btn-primary" @onclick="Save">Save Settings</button>
+        <button class="btn btn-secondary" @onclick="Reload">Reload</button>
+        @if (TelegramClient.IsConnected)
+        {
+            <button class="btn btn-danger" @onclick="Disconnect">Disconnect & Logout</button>
+        }
+    </div>
+}
+
+@code {
+    private AppSettings? _settings;
+    private string? _message;
+    private bool _isError;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _settings = await Db.Settings.FirstOrDefaultAsync();
+    }
+
+    private async Task Save()
+    {
+        if (_settings == null) return;
+        try
+        {
+            await Db.SaveChangesAsync();
+            // Apply queue limits live so no restart is needed.
+            await DownloadManager.SetMaxConcurrentAsync(_settings.MaxConcurrentDownloads);
+            await DownloadManager.SetBandwidthLimitAsync(_settings.MaxSpeedKbps);
+            _message = "Settings saved successfully.";
+            _isError = false;
+        }
+        catch (Exception ex)
+        {
+            _message = $"Error saving: {ex.Message}";
+            _isError = true;
+        }
+    }
+
+    private async Task Reload()
+    {
+        _settings = await Db.Settings.FirstOrDefaultAsync();
+        _message = null;
+    }
+
+    private async Task Disconnect()
+    {
+        await TelegramClient.DisconnectAsync();
+        _message = "Disconnected. Session cleared.";
+        _isError = false;
+    }
+}
