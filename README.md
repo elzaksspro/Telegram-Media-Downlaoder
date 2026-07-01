@@ -1,64 +1,133 @@
+<div align="center">
+
+<img src="src/TelegramMedia.Service/wwwroot/logo.svg" width="104" alt="Telegram Media Downloader logo" />
+
 # Telegram Media Downloader
 
-A Windows desktop app that auto-downloads media from your Telegram chats and channels.
-It runs as a single tray application, hosts a local Blazor dashboard (opened in a native
-WebView2 window), and works like a proper download manager — scan a channel, pick exactly
-what you want, and control the queue.
+**A Windows desktop app that auto-downloads media from your Telegram chats and channels — with a full, IDM-style download manager.**
+
+![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6?logo=windows&logoColor=white)
+![.NET](https://img.shields.io/badge/.NET-8.0-512BD4?logo=dotnet&logoColor=white)
+![UI](https://img.shields.io/badge/UI-Blazor%20%2B%20WebView2-2563eb)
+
+</div>
+
+---
+
+## Overview
+
+Telegram Media Downloader runs as a single **system-tray desktop app**. It hosts a local
+dashboard (Blazor) that opens in a **native window** (Edge WebView2) — no browser tab, no
+Windows service, and no admin rights. Point it at your Telegram channels and it works like a
+proper download manager: **scan a channel, pick exactly what you want, and control the queue**.
+
+> You need your own Telegram **API ID** and **API Hash** (free) from
+> <https://my.telegram.org/apps>. The app signs in as *you* via Telegram's official API.
 
 ## Features
 
-- **Desktop app** — single tray executable; the dashboard opens in a native window (WebView2),
-  no separate service and no admin rights required.
-- **Selective downloading** — scan a channel to *list* its media, then select individual
-  files, a page, or everything, and download only what you choose.
-- **Download-manager controls** — per-file and bulk **Start / Pause / Cancel**, **priority**
-  (move up/down, to top/bottom), global and **per-channel pause**, and **pagination** for
-  large queues.
-- **Throughput control** — live **concurrency limit** and a global **bandwidth cap** (KB/s).
-- **Real-time monitoring** — auto-download new media from monitored chats as it arrives,
-  with optional reactions.
-- **Persistent** — settings, queue, and per-chat pause state are stored locally (SQLite) and
-  survive restarts.
+- **🖥️ Real desktop app** — one tray executable; the dashboard opens in a native WebView2
+  window. No service, no UAC prompts, everything runs in your user session.
+- **🎯 Selective downloading** — *scan* a channel to **list** its media (nothing downloads),
+  then choose **individual files**, a **page**, or **everything**.
+- **⏯️ Download-manager controls** — per-file and bulk **Start / Pause / Cancel**, **priority**
+  (up/down, to top/bottom), **pagination** for huge queues, and **select-all-matching-filter**.
+- **⏸️ Granular pause** — pause **globally**, **per-channel**, or **per-file**; in-progress
+  files finish, the rest hold. Per-channel pause survives restarts.
+- **🚦 Throughput limits** — live **concurrency** control and a global **bandwidth cap** (KB/s),
+  enforced across every download.
+- **📡 Real-time monitoring** — auto-download new media from monitored chats as it arrives,
+  with optional message **reactions**.
+- **🔎 Filtering** — by filename, media type, and status; per-channel media-type and
+  min-size rules.
+- **💾 Persistent** — settings, queue, history, and pause state are stored locally (SQLite)
+  and survive restarts.
 
-## Requirements
+## Download & install (end users)
 
-- Windows 10/11
-- [.NET 8 SDK](https://dotnet.microsoft.com/download) (to build)
-- [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)
-  (preinstalled on Windows 11; the app falls back to the default browser if missing)
-- Telegram API credentials (API ID + API Hash) from <https://my.telegram.org/apps>
+1. Go to the [**Releases**](../../releases) page.
+2. Download **`TelegramMediaDownloader-Setup-x.y.z.exe`** (the installer, ~57 MB).
+3. Double-click it. Because the app isn't code-signed, Windows **SmartScreen** may warn —
+   click **More info → Run anyway**.
+4. It installs **per-user** (no admin), adds a Start-menu shortcut, sets it to **launch at
+   login**, and opens the app window.
+5. On first run, connect your Telegram account (see [First run](#first-run)).
 
-## Build & run
+> Prefer not to install? A **portable** single-file `TelegramMedia.Service.exe` may also be
+> attached to the release — just download and run it (no install, no shortcuts). It's larger
+> (~189 MB) because it bundles the .NET runtime.
 
-```powershell
-# Run from source (dev)
-powershell -ExecutionPolicy Bypass -File run-dev.ps1
-
-# Produce a self-contained exe + installer (installer needs Inno Setup 6)
-powershell -ExecutionPolicy Bypass -File build.ps1
-```
-
-The published app lands in `publish/app/TelegramMedia.Service.exe`, and the installer (if
-Inno Setup is installed) in `output/`.
+**Requirements:** Windows 10/11 and the
+[Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)
+(preinstalled on Windows 11; the app falls back to your default browser if it's missing).
 
 ## First run
 
 1. Launch the app — the dashboard window opens automatically.
-2. Enter your **API ID**, **API Hash**, and **phone number**, then verify the code Telegram
-   sends you (and your 2FA password if enabled).
-3. Go to **Chats**, tick the channels to monitor, open one, **Scan Channel**, then select and
-   download what you want.
+2. Enter your **API ID**, **API Hash**, and **phone number** (with country code, e.g.
+   `+2348012345678`), then click **Send Verification Code**.
+3. Enter the code Telegram sends you (and your **2FA password** if you have one).
+4. Once connected, go to **Chats**, tick the channels/groups to monitor, then open one.
+
+## Using it
+
+- **Scan Channel** — lists the channel's media as *Available* (nothing downloads yet).
+- Tick the files you want (or **Select all N matching** the current filter), then **▶ Download**.
+  Or hit **Download All**.
+- Manage the queue with per-row **▶ / ⏸ / ✖** and priority **⤒ ▲ ▼ ⤓**, or the bulk bar.
+- **Pause Chat** holds just that channel; the global **⏸ Pause** on the Downloads page holds
+  everything.
+- Set **Concurrent downloads** and a **Speed limit (KB/s)** on the Downloads page or in
+  **Settings** — applied live.
+
+## Build from source
+
+Requires the [.NET 8 SDK](https://dotnet.microsoft.com/download). To also build the installer,
+install [Inno Setup 6](https://jrsoftware.org/isdl.php).
+
+```powershell
+# Run from source (dev) — launches the tray app + dashboard
+powershell -ExecutionPolicy Bypass -File run-dev.ps1
+
+# Produce the self-contained exe (+ installer if Inno Setup is present)
+powershell -ExecutionPolicy Bypass -File build.ps1
+```
+
+Outputs:
+
+| Artifact | Path | Use |
+| --- | --- | --- |
+| Installer | `output/TelegramMediaDownloader-Setup-<ver>.exe` | **Distribute this** to end users |
+| Portable exe | `publish/app/TelegramMedia.Service.exe` | Optional no-install download |
 
 ## Project layout
 
 | Project | Purpose |
 | --- | --- |
-| `TelegramMedia.Core` | Models, EF Core data layer, shared services (e.g. bandwidth limiter) |
-| `TelegramMedia.Telegram` | Telegram client (WTelegramClient) + download manager/dispatcher |
-| `TelegramMedia.Service` | Blazor dashboard + tray host + WebView2 window (the app entry point) |
+| `TelegramMedia.Core` | Models, EF Core (SQLite) data layer, shared services (bandwidth limiter) |
+| `TelegramMedia.Telegram` | Telegram client ([WTelegramClient](https://github.com/wiz0u/WTelegramClient)) + the download manager / priority dispatcher |
+| `TelegramMedia.Service` | Blazor dashboard, tray host, and WebView2 window — the app entry point |
 
-## Data location
+## Where your data lives
 
-Config, database, and Telegram session live under
-`%LOCALAPPDATA%\TelegramMediaDownloader\`. Downloads default to
-`Documents\TelegramDownloads` (configurable in Settings).
+- Config, database, and Telegram session: `%LOCALAPPDATA%\TelegramMediaDownloader\`
+- Downloads (default): `Documents\TelegramDownloads` — configurable in **Settings**
+- The app binds its dashboard to `http://localhost:<port>` (default `5000`, changeable from
+  the tray menu; stored in `port.json`).
+
+## Troubleshooting
+
+- **"Not connected to Telegram"** on the Chats/channel pages — finish sign-in on the
+  Dashboard (phone → code). Scanning and downloading require an active session.
+- **A download shows "Failed"** — hover the status for the exact error (e.g. rate limits,
+  file removed). Re-select the file and hit ▶ to retry.
+- **Window is blank / won't open** — install the
+  [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/); the app
+  otherwise falls back to your default browser (tray → *Open in Browser*).
+- **SmartScreen blocks the installer** — the build isn't code-signed; choose
+  **More info → Run anyway**.
+
+## Disclaimer
+
+Use this tool only to download content you have the right to access, and in accordance with
+Telegram's Terms of Service.
