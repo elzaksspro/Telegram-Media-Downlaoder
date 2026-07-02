@@ -48,15 +48,20 @@ public class TelegramClientService : ITelegramClientService, IDisposable
     {
         string? ConfigProvider(string what)
         {
-            return what switch
+            switch (what)
             {
-                "api_id" => _apiId.ToString(),
-                "api_hash" => _apiHash,
-                "phone_number" => phoneNumber ?? _pendingPhone,
-                "verification_code" => _codeTcs?.Task.GetAwaiter().GetResult(),
-                "password" => _passwordTcs?.Task.GetAwaiter().GetResult(),
-                _ => null
-            };
+                case "api_id": return _apiId.ToString();
+                case "api_hash": return _apiHash;
+                case "phone_number":
+                    var phone = phoneNumber ?? _pendingPhone;
+                    // If WTelegram asks for a phone number while we're only trying to resume a
+                    // stored session, the session is gone/expired → a real login is required.
+                    if (string.IsNullOrEmpty(phone)) _resumeNeededLogin = true;
+                    return phone;
+                case "verification_code": return _codeTcs?.Task.GetAwaiter().GetResult();
+                case "password": return _passwordTcs?.Task.GetAwaiter().GetResult();
+                default: return null;
+            }
         }
 
         var sessionStream = new FileStream(_sessionPath, FileMode.OpenOrCreate, FileAccess.ReadWrite);
@@ -66,6 +71,7 @@ public class TelegramClientService : ITelegramClientService, IDisposable
     }
 
     private string? _pendingPhone;
+    private bool _resumeNeededLogin;
 
     public async Task ConnectAsync(int apiId, string apiHash)
     {
@@ -77,23 +83,37 @@ public class TelegramClientService : ITelegramClientService, IDisposable
         _client?.Dispose();
         _codeTcs = new TaskCompletionSource<string>();
         _passwordTcs = new TaskCompletionSource<string>();
+        _resumeNeededLogin = false;
         _client = CreateClient();
 
-        // Try to resume existing session
+        // Try to resume the stored session (no phone number provided).
         try
         {
             _currentUser = await _client.LoginUserIfNeeded();
             AuthState = AuthState.Authenticated;
             OnStatusMessage?.Invoke($"Logged in as {_currentUser.first_name} {_currentUser.last_name}".Trim());
-            _logger.LogInformation("Authenticated as {User} (existing session)", _currentUser.first_name);
+            _logger.LogInformation("Authenticated as {User} (resumed session)", _currentUser.first_name);
         }
-        catch
+        catch (Exception ex)
         {
-            // Session invalid or first time — need interactive login
-            _client.Dispose();
+            _client?.Dispose();
             _client = null;
-            AuthState = AuthState.WaitingForPhoneNumber;
-            _logger.LogInformation("No valid session, waiting for phone number");
+
+            if (_resumeNeededLogin)
+            {
+                // The stored session is genuinely gone/expired → user must sign in again.
+                AuthState = AuthState.WaitingForPhoneNumber;
+                _logger.LogInformation(ex, "No valid Telegram session; interactive login required.");
+            }
+            else
+            {
+                // Transient failure (e.g. no network yet). KEEP the session file and stay
+                // "NotAuthenticated" so the monitor worker retries the resume — do NOT force
+                // the user to log in again.
+                AuthState = AuthState.NotAuthenticated;
+                OnStatusMessage?.Invoke("Could not reach Telegram; will retry (still signed in).");
+                _logger.LogWarning(ex, "Telegram session resume failed transiently; will retry.");
+            }
         }
     }
 
