@@ -52,6 +52,10 @@ public class TelegramClientService : ITelegramClientService, IDisposable
             {
                 case "api_id": return _apiId.ToString();
                 case "api_hash": return _apiHash;
+                // Let WTelegram own the session file (open/write/flush/truncate). This is the
+                // supported way to persist a login; passing a raw FileStream made the app
+                // responsible for those semantics and dropped the saved authorization.
+                case "session_pathname": return _sessionPath;
                 case "phone_number":
                     var phone = phoneNumber ?? _pendingPhone;
                     // If WTelegram asks for a phone number while we're only trying to resume a
@@ -64,10 +68,37 @@ public class TelegramClientService : ITelegramClientService, IDisposable
             }
         }
 
-        var sessionStream = new FileStream(_sessionPath, FileMode.OpenOrCreate, FileAccess.ReadWrite);
-        var client = new Client(ConfigProvider, sessionStream);
-        client.PingInterval = 60;
-        return client;
+        Client Build()
+        {
+            var c = new Client(ConfigProvider);
+            c.PingInterval = 60;
+            return c;
+        }
+
+        try
+        {
+            return Build();
+        }
+        catch (Exception ex)
+        {
+            // WTelegram's SessionStore couldn't read the session file — either an incompatible
+            // file from an older build (raw-stream format) or a corrupted session. The failed
+            // constructor leaks the file handle, so force it closed, move the bad file aside,
+            // and start fresh. The user signs in once more; it then persists normally.
+            _logger.LogWarning(ex, "Session file unreadable; resetting {Path}", _sessionPath);
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            try
+            {
+                if (File.Exists(_sessionPath))
+                    File.Move(_sessionPath, _sessionPath + ".old", overwrite: true);
+            }
+            catch
+            {
+                try { File.Delete(_sessionPath); } catch { /* best-effort */ }
+            }
+            return Build();
+        }
     }
 
     private string? _pendingPhone;
@@ -138,7 +169,8 @@ public class TelegramClientService : ITelegramClientService, IDisposable
                 _currentUser = await _client.LoginUserIfNeeded();
                 AuthState = AuthState.Authenticated;
                 OnStatusMessage?.Invoke($"Logged in as {_currentUser.first_name} {_currentUser.last_name}".Trim());
-                _logger.LogInformation("Authenticated as {User}", _currentUser.first_name);
+                _logger.LogInformation("Authenticated as {User}; Telegram session saved to {Path}",
+                    _currentUser.first_name, _sessionPath);
             }
             catch (Exception ex)
             {
