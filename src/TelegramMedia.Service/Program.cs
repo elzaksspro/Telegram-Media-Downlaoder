@@ -84,6 +84,9 @@ static class Program
             ContentRootPath = exeDir
         });
 
+        // File logging (the app has no console) → %LOCALAPPDATA%\TelegramMediaDownloader\logs
+        builder.Logging.AddProvider(new FileLoggerProvider(Path.Combine(ConfigDir, "logs")));
+
         // Dashboard binds to the user-configured port on localhost only.
         builder.WebHost.UseUrls($"http://localhost:{_port}");
 

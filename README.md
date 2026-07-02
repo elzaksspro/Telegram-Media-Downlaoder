@@ -100,6 +100,33 @@ Outputs:
 | Installer | `output/TelegramMediaDownloader-Setup-<ver>.exe` | **Distribute this** to end users |
 | Portable exe | `publish/app/TelegramMedia.Service.exe` | Optional no-install download |
 
+## Code signing (optional)
+
+The app and installer are unsigned by default, so Windows SmartScreen warns on download. To
+sign them, `build.ps1` runs `signtool` automatically when a certificate is configured — set
+**one** of these before building:
+
+```powershell
+# Option 1: a .pfx file
+$env:SIGN_PFX = "C:\path\to\cert.pfx"; $env:SIGN_PFX_PASSWORD = "…"
+
+# Option 2: a cert already installed in your certificate store
+$env:SIGN_THUMBPRINT = "<thumbprint>"
+
+powershell -ExecutionPolicy Bypass -File build.ps1
+```
+
+Certificate options:
+
+- **[Azure Trusted Signing](https://learn.microsoft.com/azure/trusted-signing/)** (~$10/mo) —
+  the cheapest way to get a Microsoft-trusted signature; recommended for individuals.
+- **OV code-signing certificate** from a CA (~$100–400/yr) — SmartScreen reputation builds up
+  over downloads; **EV** certificates are trusted immediately but cost more.
+- **Self-signed** — only useful for local testing; it does **not** satisfy SmartScreen.
+
+Requires the [Windows SDK](https://developer.microsoft.com/windows/downloads/windows-sdk/)
+(for `signtool.exe`). Without a cert configured, signing is silently skipped.
+
 ## Project layout
 
 | Project | Purpose |
@@ -126,6 +153,10 @@ Outputs:
   otherwise falls back to your default browser (tray → *Open in Browser*).
 - **SmartScreen blocks the installer** — the build isn't code-signed; choose
   **More info → Run anyway**.
+
+## License
+
+Released under the [MIT License](LICENSE). See [CHANGELOG.md](CHANGELOG.md) for version history.
 
 ## Disclaimer
 
