@@ -1,8 +1,10 @@
 using System.Diagnostics;
+using System.Drawing;
 using System.Text.Json;
 using System.Windows.Forms;
 using Microsoft.EntityFrameworkCore;
 using TelegramMedia.Core.Data;
+using TelegramMedia.Core.Enums;
 using TelegramMedia.Core.Interfaces;
 using TelegramMedia.Core.Services;
 using TelegramMedia.Service;
@@ -16,6 +18,8 @@ namespace TelegramMedia.Service;
 static class Program
 {
     private const string MutexName = "TelegramMediaDownloaderApp";
+    private const string ShowEventName = "TelegramMediaDownloaderShow";
+    private static EventWaitHandle? _showEvent;
 
     private static readonly string ConfigDir = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -24,26 +28,49 @@ static class Program
 
     private static NotifyIcon? _trayIcon;
     private static ToolStripMenuItem? _portMenuItem;
+    private static ToolStripMenuItem? _statusMenuItem;
     private static DashboardWindow? _window;
     private static int _port;
+
+    // Live status shown on the tray icon.
+    private static ITelegramClientService? _telegram;
+    private static IDownloadManager? _downloads;
+    private static System.Windows.Forms.Timer? _statusTimer;
+    private static readonly Dictionary<string, Icon> _statusIcons = new();
+    private static string _lastStatusKey = "";
 
     [STAThread]
     static void Main(string[] args)
     {
         _port = ReadPortFromConfig();
 
-        // Single instance. When relaunching for a port change ("--restarted"),
-        // wait briefly for the previous instance to release the mutex.
+        // Single instance. If another instance appears to be running, first wait briefly for
+        // the mutex — the previous instance may just be shutting down (e.g. the user closed it
+        // and immediately reopened it), in which case we take over as the new primary.
         var mutex = new Mutex(true, MutexName, out bool isNew);
-        if (!isNew && args.Contains("--restarted"))
-            isNew = mutex.WaitOne(TimeSpan.FromSeconds(5));
+        if (!isNew)
+            isNew = mutex.WaitOne(TimeSpan.FromSeconds(4));
         if (!isNew)
         {
-            OpenBrowser();
+            // A real instance is running — ask it to show/focus its window instead of opening
+            // a browser at a port that may not be serving yet.
+            try
+            {
+                using var show = EventWaitHandle.OpenExisting(ShowEventName);
+                show.Set();
+            }
+            catch
+            {
+                OpenBrowser();
+            }
             return;
         }
 
         var app = BuildWebApp(args);
+
+        // Resolve the singletons the tray uses to show live status.
+        _telegram = app.Services.GetRequiredService<ITelegramClientService>();
+        _downloads = app.Services.GetRequiredService<IDownloadManager>();
 
         // Seed the database before the host starts handling requests.
         using (var scope = app.Services.CreateScope())
@@ -61,6 +88,7 @@ static class Program
             ApplicationConfiguration.Initialize();
             RunTray();
             OpenDashboard(); // open the app window on launch
+            StartActivationListener(); // let a second launch re-focus this window
             Application.Run();
         }
         finally
@@ -134,6 +162,12 @@ static class Program
     private static void RunTray()
     {
         var menu = new ContextMenuStrip();
+
+        // Live status header (disabled, non-clickable).
+        _statusMenuItem = new ToolStripMenuItem("● Connecting…") { Enabled = false };
+        menu.Items.Add(_statusMenuItem);
+        menu.Items.Add(new ToolStripSeparator());
+
         menu.Items.Add("Open Dashboard", null, (_, _) => OpenDashboard());
         menu.Items.Add("Open in Browser", null, (_, _) => OpenBrowser());
         menu.Items.Add("Open Downloads Folder", null, (_, _) => OpenDownloadsFolder());
@@ -148,25 +182,112 @@ static class Program
 
         _trayIcon = new NotifyIcon
         {
-            Text = $"Telegram Media Downloader (:{_port})",
+            Text = "Telegram Media Downloader",
             Icon = LoadAppIcon(),
             ContextMenuStrip = menu,
             Visible = true
         };
         _trayIcon.DoubleClick += (_, _) => OpenDashboard();
 
-        _trayIcon.ShowBalloonTip(3000, "Telegram Media Downloader",
-            $"Running on port {_port}. Double-click to open dashboard.",
-            ToolTipIcon.Info);
+        // Poll status and reflect it on the tray icon/tooltip/menu.
+        UpdateTrayStatus();
+        _statusTimer = new System.Windows.Forms.Timer { Interval = 2000 };
+        _statusTimer.Tick += (_, _) => UpdateTrayStatus();
+        _statusTimer.Start();
 
         Application.ApplicationExit += (_, _) =>
         {
+            _statusTimer?.Stop();
+            _statusTimer?.Dispose();
             if (_trayIcon is not null)
             {
                 _trayIcon.Visible = false;
                 _trayIcon.Dispose();
             }
+            foreach (var ic in _statusIcons.Values) ic.Dispose();
         };
+    }
+
+    private static void UpdateTrayStatus()
+    {
+        if (_trayIcon is null) return;
+
+        string status;
+        string key; // green | amber | gray
+        Color color;
+
+        var connected = _telegram is { IsConnected: true } && _telegram.AuthState == AuthState.Authenticated;
+        var auth = _telegram?.AuthState ?? AuthState.NotAuthenticated;
+
+        if (!connected)
+        {
+            if (auth is AuthState.WaitingForPhoneNumber or AuthState.WaitingForCode or AuthState.WaitingForPassword)
+            {
+                status = "Sign-in required"; key = "amber"; color = Color.FromArgb(217, 119, 6);
+            }
+            else
+            {
+                status = "Connecting…"; key = "gray"; color = Color.FromArgb(107, 114, 128);
+            }
+        }
+        else if (_downloads is { IsPaused: true })
+        {
+            status = "Paused"; key = "amber"; color = Color.FromArgb(217, 119, 6);
+        }
+        else
+        {
+            var active = _downloads?.ActiveDownloads.Count(d => d.Status == DownloadStatus.Downloading) ?? 0;
+            status = active > 0 ? $"Downloading {active}" : "Connected";
+            key = "green"; color = Color.FromArgb(22, 163, 74);
+        }
+
+        // Tooltip (NotifyIcon.Text caps at 63 chars).
+        var tip = $"Telegram Media Downloader — {status}";
+        if (tip.Length > 63) tip = tip[..63];
+        if (_trayIcon.Text != tip) _trayIcon.Text = tip;
+
+        if (_statusMenuItem is not null)
+        {
+            _statusMenuItem.Text = $"● {status}";
+            _statusMenuItem.ForeColor = color;
+        }
+
+        // Swap the icon's status dot only when the state changes.
+        if (key != _lastStatusKey)
+        {
+            _lastStatusKey = key;
+            _trayIcon.Icon = GetStatusIcon(key, color);
+        }
+    }
+
+    private static Icon GetStatusIcon(string key, Color color)
+    {
+        if (_statusIcons.TryGetValue(key, out var cached)) return cached;
+
+        Icon icon;
+        try
+        {
+            using var baseIcon = LoadAppIcon();
+            using var bmp = baseIcon.ToBitmap();
+            using (var g = Graphics.FromImage(bmp))
+            {
+                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                var d = Math.Max(6, bmp.Width * 7 / 16);
+                var x = bmp.Width - d - 1;
+                var y = bmp.Height - d - 1;
+                using var fill = new SolidBrush(color);
+                using var ring = new Pen(Color.White, Math.Max(1f, bmp.Width / 16f));
+                g.FillEllipse(fill, x, y, d, d);
+                g.DrawEllipse(ring, x, y, d, d);
+            }
+            icon = Icon.FromHandle(bmp.GetHicon());
+        }
+        catch
+        {
+            icon = LoadAppIcon();
+        }
+        _statusIcons[key] = icon;
+        return icon;
     }
 
     // The app icon is embedded in the exe via <ApplicationIcon>; pull it back out for
@@ -184,6 +305,38 @@ static class Program
         }
         catch { }
         return SystemIcons.Application;
+    }
+
+    // Listens for a "show" signal from a second launch and re-focuses the existing window,
+    // so relaunching the app never opens a browser (which could hit a not-yet-ready port).
+    private static void StartActivationListener()
+    {
+        _showEvent = new EventWaitHandle(false, EventResetMode.AutoReset, ShowEventName);
+        var thread = new Thread(() =>
+        {
+            while (true)
+            {
+                try { if (!_showEvent.WaitOne()) break; }
+                catch { break; }
+                ShowExistingWindow();
+            }
+        })
+        {
+            IsBackground = true,
+            Name = "ActivationListener"
+        };
+        thread.Start();
+    }
+
+    private static void ShowExistingWindow()
+    {
+        var w = _window;
+        if (w is { IsDisposed: false, IsHandleCreated: true })
+        {
+            try { w.BeginInvoke((Action)(() => w.ShowDashboard())); return; }
+            catch { /* fall through to browser */ }
+        }
+        OpenBrowser();
     }
 
     private static void OpenDashboard()

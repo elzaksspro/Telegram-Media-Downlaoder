@@ -15,6 +15,7 @@ namespace TelegramMedia.Service;
 public sealed class DashboardWindow : Form
 {
     private readonly WebView2 _web;
+    private readonly Label _loading;
     private readonly string _url;
     private readonly string _userDataFolder;
     private bool _initFailed;
@@ -28,10 +29,40 @@ public sealed class DashboardWindow : Form
         Width = 1280;
         Height = 820;
         StartPosition = FormStartPosition.CenterScreen;
+        BackColor = Color.FromArgb(37, 99, 235); // brand blue, avoids a white flash before load
         try { Icon = Program.LoadAppIcon(); } catch { /* icon is best-effort */ }
 
         _web = new WebView2 { Dock = DockStyle.Fill };
         Controls.Add(_web);
+
+        // Branded "Starting…" splash shown until the dashboard finishes loading.
+        _loading = new Label
+        {
+            Dock = DockStyle.Fill,
+            Text = "Starting Telegram Media Downloader…",
+            TextAlign = ContentAlignment.MiddleCenter,
+            BackColor = Color.FromArgb(37, 99, 235),
+            ForeColor = Color.White,
+            Font = new Font("Segoe UI", 13F)
+        };
+        Controls.Add(_loading);
+        _loading.BringToFront();
+
+        _web.NavigationCompleted += (_, e) =>
+        {
+            if (e.IsSuccess)
+            {
+                _loading.Visible = false;
+            }
+            else
+            {
+                // Server not ready yet — keep the splash and retry shortly.
+                _loading.Text = "Starting Telegram Media Downloader…";
+                _loading.Visible = true;
+                _loading.BringToFront();
+                _ = RetryNavigateAsync();
+            }
+        };
 
         Load += async (_, _) => await InitAsync();
         FormClosing += (_, e) =>
@@ -60,6 +91,12 @@ public sealed class DashboardWindow : Form
             OpenInBrowser();
             Hide();
         }
+    }
+
+    private async Task RetryNavigateAsync()
+    {
+        await Task.Delay(700);
+        try { _web.CoreWebView2?.Navigate(_url); } catch { /* will retry on next failure */ }
     }
 
     public void ShowDashboard()
