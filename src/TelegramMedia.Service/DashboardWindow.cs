@@ -110,6 +110,11 @@ public sealed class DashboardWindow : Form
         if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
         Activate();
         BringToFront();
+        // Force the window to the foreground even when triggered from a background thread
+        // (a second launch signalling this instance).
+        var wasTopMost = TopMost;
+        TopMost = true;
+        TopMost = wasTopMost;
     }
 
     private void OpenInBrowser()

@@ -28,6 +28,7 @@ static class Program
 
     private static NotifyIcon? _trayIcon;
     private static ToolStripMenuItem? _portMenuItem;
+    private static ToolStripMenuItem? _serviceMenuItem;
     private static ToolStripMenuItem? _statusMenuItem;
     private static DashboardWindow? _window;
     private static int _port;
@@ -35,6 +36,7 @@ static class Program
     // Live status shown on the tray icon.
     private static ITelegramClientService? _telegram;
     private static IDownloadManager? _downloads;
+    private static volatile bool _hostRunning;
     private static System.Windows.Forms.Timer? _statusTimer;
     private static readonly Dictionary<string, Icon> _statusIcons = new();
     private static string _lastStatusKey = "";
@@ -71,6 +73,11 @@ static class Program
         // Resolve the singletons the tray uses to show live status.
         _telegram = app.Services.GetRequiredService<ITelegramClientService>();
         _downloads = app.Services.GetRequiredService<IDownloadManager>();
+
+        // Track the in-process host (service) health for the tray status.
+        app.Lifetime.ApplicationStarted.Register(() => _hostRunning = true);
+        app.Lifetime.ApplicationStopping.Register(() => _hostRunning = false);
+        app.Lifetime.ApplicationStopped.Register(() => _hostRunning = false);
 
         // Seed the database before the host starts handling requests.
         using (var scope = app.Services.CreateScope())
@@ -163,8 +170,10 @@ static class Program
     {
         var menu = new ContextMenuStrip();
 
-        // Live status header (disabled, non-clickable).
-        _statusMenuItem = new ToolStripMenuItem("● Connecting…") { Enabled = false };
+        // Live status headers (disabled, non-clickable): service (host) + Telegram.
+        _serviceMenuItem = new ToolStripMenuItem("Service: starting…") { Enabled = false };
+        _statusMenuItem = new ToolStripMenuItem("Telegram: …") { Enabled = false };
+        menu.Items.Add(_serviceMenuItem);
         menu.Items.Add(_statusMenuItem);
         menu.Items.Add(new ToolStripSeparator());
 
@@ -178,6 +187,7 @@ static class Program
         menu.Items.Add(_portMenuItem);
 
         menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add("Restart", null, (_, _) => RestartApp());
         menu.Items.Add("Exit", null, (_, _) => Application.Exit());
 
         _trayIcon = new NotifyIcon
@@ -208,12 +218,27 @@ static class Program
         };
     }
 
+    private static readonly Color Green = Color.FromArgb(22, 163, 74);
+    private static readonly Color Amber = Color.FromArgb(217, 119, 6);
+    private static readonly Color Gray = Color.FromArgb(107, 114, 128);
+    private static readonly Color Red = Color.FromArgb(220, 38, 38);
+
     private static void UpdateTrayStatus()
     {
         if (_trayIcon is null) return;
 
-        string status;
-        string key; // green | amber | gray
+        // --- Service (in-process host) health ---
+        var serviceRunning = _hostRunning;
+        var serviceText = serviceRunning ? "Running" : "Stopped — use Restart";
+        if (_serviceMenuItem is not null)
+        {
+            _serviceMenuItem.Text = $"Service: {serviceText}";
+            _serviceMenuItem.ForeColor = serviceRunning ? Green : Red;
+        }
+
+        // --- Telegram connection status ---
+        string tg;
+        string key;   // icon dot: green | amber | gray | red
         Color color;
 
         var connected = _telegram is { IsConnected: true } && _telegram.AuthState == AuthState.Authenticated;
@@ -223,34 +248,37 @@ static class Program
         {
             if (auth is AuthState.WaitingForPhoneNumber or AuthState.WaitingForCode or AuthState.WaitingForPassword)
             {
-                status = "Sign-in required"; key = "amber"; color = Color.FromArgb(217, 119, 6);
+                tg = "Sign-in required"; key = "amber"; color = Amber;
             }
             else
             {
-                status = "Connecting…"; key = "gray"; color = Color.FromArgb(107, 114, 128);
+                tg = "Connecting…"; key = "gray"; color = Gray;
             }
         }
         else if (_downloads is { IsPaused: true })
         {
-            status = "Paused"; key = "amber"; color = Color.FromArgb(217, 119, 6);
+            tg = "Paused"; key = "amber"; color = Amber;
         }
         else
         {
             var active = _downloads?.ActiveDownloads.Count(d => d.Status == DownloadStatus.Downloading) ?? 0;
-            status = active > 0 ? $"Downloading {active}" : "Connected";
-            key = "green"; color = Color.FromArgb(22, 163, 74);
+            tg = active > 0 ? $"Downloading {active}" : "Connected";
+            key = "green"; color = Green;
         }
-
-        // Tooltip (NotifyIcon.Text caps at 63 chars).
-        var tip = $"Telegram Media Downloader — {status}";
-        if (tip.Length > 63) tip = tip[..63];
-        if (_trayIcon.Text != tip) _trayIcon.Text = tip;
 
         if (_statusMenuItem is not null)
         {
-            _statusMenuItem.Text = $"● {status}";
+            _statusMenuItem.Text = $"Telegram: {tg}";
             _statusMenuItem.ForeColor = color;
         }
+
+        // A stopped host dominates the icon/tooltip (it's the actionable problem).
+        if (!serviceRunning) { key = "red"; color = Red; }
+
+        // Tooltip (NotifyIcon.Text caps at 63 chars).
+        var tip = $"Telegram Media Downloader — Service {serviceText.Split('—')[0].Trim()} · {tg}";
+        if (tip.Length > 63) tip = tip[..63];
+        if (_trayIcon.Text != tip) _trayIcon.Text = tip;
 
         // Swap the icon's status dot only when the state changes.
         if (key != _lastStatusKey)
