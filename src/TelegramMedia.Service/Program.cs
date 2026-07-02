@@ -65,9 +65,19 @@ static class Program
         }
         finally
         {
-            app.StopAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
+            // Run shutdown OFF the UI thread. Blocking the STA main thread here (its WinForms
+            // SynchronizationContext no longer pumps after Application.Run returns) can deadlock
+            // and leave the process — and thus the single-instance mutex — alive, which stops
+            // the app from launching again.
+            try { Task.Run(() => app.StopAsync(TimeSpan.FromSeconds(5))).GetAwaiter().GetResult(); }
+            catch { /* ignore shutdown errors */ }
+            try { mutex.ReleaseMutex(); } catch { /* not owned */ }
             mutex.Dispose();
         }
+
+        // Guarantee the process fully exits so the mutex is freed and the app can relaunch
+        // (WebView2/host background threads can otherwise keep it alive).
+        Environment.Exit(0);
     }
 
     private static WebApplication BuildWebApp(string[] args)
