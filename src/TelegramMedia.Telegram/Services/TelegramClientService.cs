@@ -75,6 +75,13 @@ public class TelegramClientService : ITelegramClientService, IDisposable
                 // supported way to persist a login; passing a raw FileStream made the app
                 // responsible for those semantics and dropped the saved authorization.
                 case "session_pathname": return _sessionPath;
+                // CRITICAL: when resuming a stored session, WTelegram validates the logged-in
+                // user by first asking "user_id" and, if that returns null, falling back to
+                // asking "phone_number" to compare digits. Without this answer, every restart
+                // asked for the phone — which the app surfaced as "sign-in required" even
+                // though the session was perfectly valid. "-1" is WTelegram's documented
+                // "accept whichever user is logged in", making resume fully silent.
+                case "user_id": return "-1";
                 // WTelegram only asks for these when a fresh login is needed (a valid resumed
                 // session never hits them). We block the WTelegram thread until the UI supplies
                 // each value via the TCSes — same single client drives the whole flow.
@@ -98,6 +105,11 @@ public class TelegramClientService : ITelegramClientService, IDisposable
             _logger.LogInformation("Creating Telegram client (session file: {Size} bytes)", size);
             var c = new Client(ConfigProvider);
             c.PingInterval = 60;
+            // UserId is populated from the loaded session — the definitive signal for whether
+            // a silent resume is possible or a sign-in will be needed.
+            _logger.LogInformation(c.UserId != 0
+                ? $"Session loaded: user {c.UserId} — resuming silently"
+                : "Session loaded: no user — sign-in will be required");
             return c;
         }
 
@@ -112,18 +124,24 @@ public class TelegramClientService : ITelegramClientService, IDisposable
             // constructor leaks the file handle, so force it closed, move the bad file aside,
             // and start fresh. The user signs in once more; it then persists normally.
             _logger.LogWarning(ex, "Session file unreadable; resetting {Path}", _sessionPath);
-            GC.Collect();
-            GC.WaitForPendingFinalizers();
-            try
-            {
-                if (File.Exists(_sessionPath))
-                    File.Move(_sessionPath, _sessionPath + ".old", overwrite: true);
-            }
-            catch
-            {
-                try { File.Delete(_sessionPath); } catch { /* best-effort */ }
-            }
+            ResetSessionFile();
             return Build();
+        }
+    }
+
+    /// <summary>Move the session file aside (or delete it) so the next client starts fresh.</summary>
+    private void ResetSessionFile()
+    {
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        try
+        {
+            if (File.Exists(_sessionPath))
+                File.Move(_sessionPath, _sessionPath + ".old", overwrite: true);
+        }
+        catch
+        {
+            try { File.Delete(_sessionPath); } catch { /* best-effort */ }
         }
     }
 
@@ -172,16 +190,38 @@ public class TelegramClientService : ITelegramClientService, IDisposable
         }
         catch (Exception ex)
         {
-            // A valid session that hits a transient resume error lands here (NOT wiped). Drop the
-            // client so the monitor worker can cleanly retry the resume; the session file is kept.
-            _logger.LogWarning(ex, "Telegram resume/login failed; will retry.");
-            OnStatusMessage?.Invoke("Could not reach Telegram; will retry.");
+            // Telegram telling us the stored authorization is dead (revoked from another device,
+            // expired, account deactivated) — retrying the resume would loop forever. Reset the
+            // session file and ask the user to sign in again.
+            var revoked = ex is TL.RpcException rpc && rpc.Code == 401
+                && rpc.Message is "AUTH_KEY_UNREGISTERED" or "SESSION_REVOKED" or "SESSION_EXPIRED" or "USER_DEACTIVATED";
+
+            if (revoked)
+            {
+                _logger.LogWarning(ex, "Telegram session revoked/expired; sign-in required.");
+                OnStatusMessage?.Invoke("Telegram session expired — please sign in again.");
+            }
+            else
+            {
+                // Transient (network, timeout…): keep the session file; the worker retries the resume.
+                _logger.LogWarning(ex, "Telegram resume/login failed; will retry.");
+                OnStatusMessage?.Invoke("Could not reach Telegram; will retry.");
+            }
+
             await _authGate.WaitAsync();
             try
             {
                 try { client.Dispose(); } catch { /* best-effort */ }
                 if (ReferenceEquals(_client, client)) { _client = null; _currentUser = null; }
-                AuthState = AuthState.NotAuthenticated;
+                if (revoked)
+                {
+                    ResetSessionFile();
+                    AuthState = AuthState.WaitingForPhoneNumber;
+                }
+                else
+                {
+                    AuthState = AuthState.NotAuthenticated;
+                }
             }
             finally { _authGate.Release(); }
         }

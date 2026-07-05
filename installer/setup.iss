@@ -2,7 +2,7 @@
 ; Requires Inno Setup 6+ (https://jrsoftware.org/isinfo.php)
 
 #define MyAppName "Telegram Media Downloader"
-#define MyAppVersion "1.1.5"
+#define MyAppVersion "1.1.6"
 #define MyAppPublisher "TelegramMediaDownloader"
 #define MyAppURL "https://github.com/il90il90/TelegramMediaDownloader"
 #define AppExe "TelegramMedia.Service.exe"
