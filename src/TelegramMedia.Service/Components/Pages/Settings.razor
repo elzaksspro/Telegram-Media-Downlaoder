@@ -1,10 +1,12 @@
 @page "/settings"
 @using Microsoft.EntityFrameworkCore
 @using TelegramMedia.Core.Data
+@using TelegramMedia.Core.Enums
 @using TelegramMedia.Core.Interfaces
 @inject AppDbContext Db
 @inject ITelegramClientService TelegramClient
 @inject IDownloadManager DownloadManager
+@implements IDisposable
 
 <h1>Settings</h1>
 
@@ -35,6 +37,67 @@ else
                 <input class="form-control" type="text" @bind="_settings.ApiHash" />
             </div>
         </div>
+    </div>
+
+    <!-- Telegram Connection -->
+    <div class="card">
+        <h3>Telegram Connection</h3>
+
+        @if (!string.IsNullOrEmpty(_authMessage))
+        {
+            <div class="alert @(_authMessage.Contains("Error", StringComparison.OrdinalIgnoreCase) || _authMessage.Contains("fail", StringComparison.OrdinalIgnoreCase) ? "alert-danger" : "alert-info")">
+                @_authMessage
+            </div>
+        }
+
+        @if (TelegramClient.AuthState == AuthState.Authenticated)
+        {
+            <div class="alert alert-success" style="margin-bottom:12px;">✓ Connected to Telegram.</div>
+            <button class="btn btn-danger" @onclick="Disconnect">Disconnect &amp; Logout</button>
+        }
+        else if (_authStep == "code")
+        {
+            <p style="font-size:0.85rem; color:var(--text-secondary); margin-bottom:12px;">
+                Enter the verification code Telegram just sent you.
+            </p>
+            <div class="form-group">
+                <label>Verification Code</label>
+                <input class="form-control" type="text" @bind="_code"
+                       placeholder="12345" style="letter-spacing:6px; font-weight:700; max-width:220px;" />
+            </div>
+            <button class="btn btn-primary" @onclick="SubmitCode" disabled="@_isConnecting">
+                @(_isConnecting ? "Verifying…" : "Verify Code")
+            </button>
+            <button class="btn btn-secondary" style="margin-left:8px;" @onclick="ResetAuth">Start over</button>
+        }
+        else if (_authStep == "password")
+        {
+            <p style="font-size:0.85rem; color:var(--text-secondary); margin-bottom:12px;">
+                Your account has two-factor authentication. Enter your 2FA password.
+            </p>
+            <div class="form-group">
+                <label>2FA Password</label>
+                <input class="form-control" type="password" @bind="_password" style="max-width:320px;" />
+            </div>
+            <button class="btn btn-primary" @onclick="SubmitPassword" disabled="@_isConnecting">
+                @(_isConnecting ? "Authenticating…" : "Submit Password")
+            </button>
+            <button class="btn btn-secondary" style="margin-left:8px;" @onclick="ResetAuth">Start over</button>
+        }
+        else
+        {
+            <p style="font-size:0.85rem; color:var(--text-secondary); margin-bottom:12px;">
+                Make sure your API ID/Hash above are correct, then enter your phone number to sign in.
+            </p>
+            <div class="form-group">
+                <label>Phone Number</label>
+                <input class="form-control" type="tel" @bind="_phoneNumber"
+                       placeholder="+234 801 234 5678" style="max-width:320px;" />
+            </div>
+            <button class="btn btn-primary" @onclick="Connect" disabled="@_isConnecting">
+                @(_isConnecting ? "Sending…" : "Send Verification Code")
+            </button>
+        }
     </div>
 
     <!-- Download Settings -->
@@ -107,10 +170,6 @@ else
     <div style="display: flex; gap: 12px; margin-top: 20px;">
         <button class="btn btn-primary" @onclick="Save">Save Settings</button>
         <button class="btn btn-secondary" @onclick="Reload">Reload</button>
-        @if (TelegramClient.IsConnected)
-        {
-            <button class="btn btn-danger" @onclick="Disconnect">Disconnect & Logout</button>
-        }
     </div>
 }
 
@@ -119,9 +178,115 @@ else
     private string? _message;
     private bool _isError;
 
+    // Connection flow state
+    private string _phoneNumber = "";
+    private string _code = "";
+    private string _password = "";
+    private string _authStep = "phone"; // phone, code, password
+    private string? _authMessage;
+    private bool _isConnecting;
+    private System.Threading.Timer? _authTimer;
+    private AuthState _lastAuthState = AuthState.NotAuthenticated;
+
     protected override async Task OnInitializedAsync()
     {
         _settings = await Db.Settings.FirstOrDefaultAsync();
+        TelegramClient.OnStatusMessage += OnAuthStatus;
+
+        // Reflect background auth-state transitions (WaitingForCode/Password/Authenticated).
+        _authTimer = new System.Threading.Timer(_ =>
+        {
+            var s = TelegramClient.AuthState;
+            if (s == _lastAuthState) return;
+            _lastAuthState = s;
+            if (s == AuthState.WaitingForCode) _authStep = "code";
+            else if (s == AuthState.WaitingForPassword) _authStep = "password";
+            InvokeAsync(StateHasChanged);
+        }, null, 0, 1000);
+    }
+
+    private void OnAuthStatus(string message)
+    {
+        _authMessage = message;
+        InvokeAsync(StateHasChanged);
+    }
+
+    private async Task Connect()
+    {
+        if (_settings == null) return;
+        _isConnecting = true;
+        _authMessage = null;
+        try
+        {
+            await Db.SaveChangesAsync(); // persist API ID/Hash the user entered
+            await TelegramClient.ConnectAsync(_settings.ApiId, _settings.ApiHash);
+
+            if (TelegramClient.AuthState == AuthState.Authenticated)
+            {
+                _authMessage = "Already connected.";
+            }
+            else
+            {
+                await TelegramClient.SendCodeAsync(_phoneNumber);
+                _authMessage = "Verification code sent to your Telegram app.";
+                _authStep = "code";
+            }
+        }
+        catch (Exception ex)
+        {
+            _authMessage = $"Error: {ex.Message}";
+        }
+        _isConnecting = false;
+    }
+
+    private async Task SubmitCode()
+    {
+        _isConnecting = true;
+        try
+        {
+            await TelegramClient.SubmitCodeAsync(_code);
+            _authMessage = "Verifying…";
+            for (var i = 0; i < 20; i++)
+            {
+                await Task.Delay(500);
+                if (TelegramClient.AuthState == AuthState.Authenticated) { _authMessage = "Connected."; break; }
+                if (TelegramClient.AuthState == AuthState.WaitingForPassword) { _authStep = "password"; _authMessage = "2FA password required."; break; }
+            }
+        }
+        catch (Exception ex) { _authMessage = $"Error: {ex.Message}"; }
+        _isConnecting = false;
+    }
+
+    private async Task SubmitPassword()
+    {
+        _isConnecting = true;
+        try
+        {
+            await TelegramClient.SubmitPasswordAsync(_password);
+            _authMessage = "Authenticating…";
+            for (var i = 0; i < 20; i++)
+            {
+                await Task.Delay(500);
+                if (TelegramClient.AuthState == AuthState.Authenticated) { _authMessage = "Connected."; break; }
+            }
+        }
+        catch (Exception ex) { _authMessage = $"Error: {ex.Message}"; }
+        _isConnecting = false;
+    }
+
+    private async Task ResetAuth()
+    {
+        await TelegramClient.DisconnectAsync();
+        _authStep = "phone";
+        _code = "";
+        _password = "";
+        _authMessage = null;
+    }
+
+    public void Dispose()
+    {
+        TelegramClient.OnStatusMessage -= OnAuthStatus;
+        _authTimer?.Dispose();
     }
 
     private async Task Save()
@@ -152,6 +317,10 @@ else
     private async Task Disconnect()
     {
         await TelegramClient.DisconnectAsync();
+        _authStep = "phone";
+        _code = "";
+        _password = "";
+        _authMessage = null;
         _message = "Disconnected. Session cleared.";
         _isError = false;
     }
