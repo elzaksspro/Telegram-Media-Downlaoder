@@ -1,4 +1,5 @@
 @inherits LayoutComponentBase
+@implements IDisposable
 
 <div class="app-container">
     <nav class="sidebar">
@@ -41,8 +42,8 @@
             </li>
         </ul>
         <div class="sidebar-footer">
-            <div class="status-indicator @(IsConnected ? "connected" : "disconnected")">
-                <span>@(IsConnected ? "Connected" : "Not Connected")</span>
+            <div class="status-indicator @(StatusClass)">
+                <span>@StatusText</span>
             </div>
         </div>
     </nav>
@@ -56,7 +57,37 @@
     [Inject] private TelegramMedia.Core.Interfaces.ITelegramClientService TelegramClient { get; set; } = default!;
     [Inject] private NavigationManager Navigation { get; set; } = default!;
 
-    private bool IsConnected => TelegramClient.IsConnected;
+    private System.Threading.Timer? _statusTimer;
+    private TelegramMedia.Core.Enums.AuthState _lastState;
+
+    private string StatusClass => TelegramClient.AuthState switch
+    {
+        TelegramMedia.Core.Enums.AuthState.Authenticated => "connected",
+        _ => "disconnected"
+    };
+
+    private string StatusText => TelegramClient.AuthState switch
+    {
+        TelegramMedia.Core.Enums.AuthState.Authenticated => "Connected",
+        TelegramMedia.Core.Enums.AuthState.WaitingForPhoneNumber => "Sign-in required",
+        TelegramMedia.Core.Enums.AuthState.WaitingForCode => "Enter code…",
+        TelegramMedia.Core.Enums.AuthState.WaitingForPassword => "Enter 2FA…",
+        _ => "Connecting…"
+    };
+
+    protected override void OnInitialized()
+    {
+        _lastState = TelegramClient.AuthState;
+        _statusTimer = new System.Threading.Timer(_ =>
+        {
+            var s = TelegramClient.AuthState;
+            if (s != _lastState)
+            {
+                _lastState = s;
+                InvokeAsync(StateHasChanged);
+            }
+        }, null, 1000, 1000);
+    }
 
     private string GetNavClass(string path)
     {
@@ -64,4 +95,6 @@
         if (path == "/") return string.IsNullOrEmpty(currentUri) ? "active" : "";
         return currentUri.StartsWith(path.TrimStart('/')) ? "active" : "";
     }
+
+    public void Dispose() => _statusTimer?.Dispose();
 }

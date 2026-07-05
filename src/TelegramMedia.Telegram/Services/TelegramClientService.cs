@@ -54,10 +54,11 @@ public class TelegramClientService : ITelegramClientService, IDisposable
         _wtLogWired = true;
         WTelegram.Helpers.Log = (lvl, msg) =>
         {
-            // Only surface warnings/errors to keep logs small during heavy downloading; routine
-            // WTelegram chatter (levels 0-2) is dropped.
-            if (lvl < 3) return;
-            var level = lvl == 4 ? LogLevel.Error : lvl >= 5 ? LogLevel.Critical : LogLevel.Warning;
+            // Level >=2 gives the session-lifecycle breadcrumbs ("Loaded previous session",
+            // connects, disposals) that make login issues diagnosable in the field, without
+            // the per-message chatter of levels 0-1.
+            if (lvl < 2) return;
+            var level = lvl switch { 2 => LogLevel.Information, 3 => LogLevel.Warning, 4 => LogLevel.Error, _ => LogLevel.Critical };
             _logger.Log(level, "[WTelegram] {Message}", msg);
         };
     }
@@ -93,6 +94,8 @@ public class TelegramClientService : ITelegramClientService, IDisposable
 
         Client Build()
         {
+            var size = File.Exists(_sessionPath) ? new FileInfo(_sessionPath).Length : 0;
+            _logger.LogInformation("Creating Telegram client (session file: {Size} bytes)", size);
             var c = new Client(ConfigProvider);
             c.PingInterval = 60;
             return c;
@@ -801,6 +804,7 @@ public class TelegramClientService : ITelegramClientService, IDisposable
                 _client = null;
                 _currentUser = null;
                 await Task.Run(() => { try { c.Dispose(); } catch { /* best-effort */ } });
+                _logger.LogInformation("Telegram client disconnected and disposed (session persisted).");
             }
             AuthState = AuthState.NotAuthenticated;
         }

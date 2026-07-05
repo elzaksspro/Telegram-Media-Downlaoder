@@ -10,9 +10,15 @@
 
 <h1>Chat Management</h1>
 
-@if (TelegramClient.AuthState != AuthState.Authenticated)
+@if (TelegramClient.AuthState is AuthState.WaitingForPhoneNumber or AuthState.WaitingForCode or AuthState.WaitingForPassword)
 {
-    <div class="alert alert-warning">Please authenticate first on the Dashboard page.</div>
+    <div class="alert alert-warning">
+        Sign-in required — connect your Telegram account in <a href="/settings" style="color:inherit; text-decoration:underline;">Settings</a>.
+    </div>
+}
+else if (TelegramClient.AuthState != AuthState.Authenticated)
+{
+    <div class="alert alert-info">Connecting to Telegram… resuming your saved session.</div>
 }
 else
 {

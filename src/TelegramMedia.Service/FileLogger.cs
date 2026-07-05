@@ -58,6 +58,7 @@ internal sealed class FileLogger : ILogger
         var sb = new StringBuilder()
             .Append(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff"))
             .Append(" [").Append(Level(logLevel)).Append("] ")
+            .Append('#').Append(Environment.ProcessId).Append(' ')
             .Append(_category).Append(": ")
             .Append(formatter(state, exception)).Append('\n');
         if (exception != null) sb.Append(exception).Append('\n');

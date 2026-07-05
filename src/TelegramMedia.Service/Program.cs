@@ -46,12 +46,15 @@ static class Program
     {
         _port = ReadPortFromConfig();
 
-        // Single instance. If another instance appears to be running, first wait briefly for
-        // the mutex — the previous instance may just be shutting down (e.g. the user closed it
-        // and immediately reopened it), in which case we take over as the new primary.
+        // Single instance. If another instance appears to be running, first wait for the
+        // mutex — the previous instance may just be shutting down (it disconnects Telegram
+        // before releasing, which can take a few seconds), in which case we take over.
         var mutex = new Mutex(true, MutexName, out bool isNew);
         if (!isNew)
-            isNew = mutex.WaitOne(TimeSpan.FromSeconds(4));
+        {
+            try { isNew = mutex.WaitOne(TimeSpan.FromSeconds(12)); }
+            catch (AbandonedMutexException) { isNew = true; } // previous instance was killed; we own it now
+        }
         if (!isNew)
         {
             // A real instance is running — ask it to show/focus its window instead of opening
@@ -106,6 +109,14 @@ static class Program
             // the app from launching again.
             try { Task.Run(() => app.StopAsync(TimeSpan.FromSeconds(5))).GetAwaiter().GetResult(); }
             catch { /* ignore shutdown errors */ }
+
+            // CRITICAL: fully disconnect the Telegram client BEFORE releasing the mutex.
+            // If the old connection is still alive when the next instance connects with the
+            // same auth key, Telegram raises AUTH_KEY_DUPLICATED and invalidates the saved
+            // login — which is what forced users to re-authenticate after every restart.
+            try { Task.Run(() => _telegram?.DisconnectAsync()).Wait(TimeSpan.FromSeconds(5)); }
+            catch { /* best-effort */ }
+
             try { mutex.ReleaseMutex(); } catch { /* not owned */ }
             mutex.Dispose();
         }
@@ -160,6 +171,14 @@ static class Program
         app.UseAntiforgery();
         app.MapRazorComponents<Components.App>()
             .AddInteractiveServerRenderMode();
+
+        // Clean-exit hook (dashboard binds to localhost only). Same path as tray Exit —
+        // used for scripted restarts and update flows.
+        app.MapPost("/api/shutdown", () =>
+        {
+            _ = Task.Run(() => Application.Exit());
+            return Results.Ok("shutting down");
+        });
 
         return app;
     }

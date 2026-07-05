@@ -29,13 +29,17 @@ else
         }
     </div>
 
-    @if (!IsConnected)
+    @if (TelegramClient.AuthState is AuthState.WaitingForPhoneNumber or AuthState.WaitingForCode or AuthState.WaitingForPassword)
     {
         <div class="alert alert-warning">
-            <strong>Not connected to Telegram (@TelegramClient.AuthState).</strong>
-            Scanning and downloading need an active Telegram session.
-            <a href="/" style="color:inherit; text-decoration:underline;">Go to the Dashboard to connect</a>.
+            <strong>Sign-in required.</strong>
+            Scanning and downloading need an active Telegram session —
+            <a href="/settings" style="color:inherit; text-decoration:underline;">connect in Settings</a>.
         </div>
+    }
+    else if (!IsConnected)
+    {
+        <div class="alert alert-info">Connecting to Telegram… resuming your saved session.</div>
     }
 
     @if (!string.IsNullOrEmpty(_message))

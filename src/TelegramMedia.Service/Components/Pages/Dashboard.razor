@@ -9,13 +9,19 @@
 
     <h1>Dashboard</h1>
 
-    @if (TelegramClient.AuthState != AuthState.Authenticated)
+    @if (TelegramClient.AuthState is AuthState.WaitingForPhoneNumber or AuthState.WaitingForCode or AuthState.WaitingForPassword)
     {
         <div class="alert alert-warning" style="margin-bottom:16px;">
-            <strong>Not connected to Telegram.</strong>
-            Connect your account in
+            <strong>Sign-in required.</strong>
+            Connect your Telegram account in
             <a href="/settings" style="color:inherit; text-decoration:underline; font-weight:600;">Settings</a>
             to start downloading.
+        </div>
+    }
+    else if (TelegramClient.AuthState != AuthState.Authenticated)
+    {
+        <div class="alert alert-info" style="margin-bottom:16px;">
+            <strong>Connecting to Telegram…</strong> resuming your saved session. This clears in a few seconds.
         </div>
     }
 
@@ -196,7 +202,7 @@
     private List<string> _statusMessages = new();
     private Timer? _authPollTimer;
     private Timer? _refreshTimer;
-    private bool _wasConnected;
+    private AuthState _lastAuthState = AuthState.NotAuthenticated;
 
     private record ChatActivity(long TelegramChatId, string ChatName, string ChatType,
         int Downloading, int Queued, int Paused);
@@ -210,13 +216,14 @@
         TelegramClient.OnStatusMessage += OnStatus;
         DownloadManager.OnStateChanged += OnDownloadStateChanged;
 
-        // Refresh the dashboard when connection state changes so the banner clears on connect.
+        // Refresh the dashboard whenever the auth state changes so the banner tracks
+        // Connecting… → Connected (or → Sign-in required) live.
         _authPollTimer = new Timer(_ =>
         {
-            var connected = TelegramClient.AuthState == AuthState.Authenticated;
-            if (connected != _wasConnected)
+            var s = TelegramClient.AuthState;
+            if (s != _lastAuthState)
             {
-                _wasConnected = connected;
+                _lastAuthState = s;
                 InvokeAsync(StateHasChanged);
             }
         }, null, 0, 1000);
