@@ -167,7 +167,12 @@ static class Program
 
         var app = builder.Build();
 
-        app.UseStaticFiles();
+        // Local-only app: make browsers/WebView2 revalidate static assets so a stale cached
+        // stylesheet can never mask UI updates (e.g. the dark-mode palette).
+        app.UseStaticFiles(new StaticFileOptions
+        {
+            OnPrepareResponse = ctx => ctx.Context.Response.Headers.CacheControl = "no-cache"
+        });
         app.UseAntiforgery();
         app.MapRazorComponents<Components.App>()
             .AddInteractiveServerRenderMode();

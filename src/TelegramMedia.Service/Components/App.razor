@@ -7,25 +7,22 @@
     <base href="/" />
     <script>
         // Apply the saved theme before the stylesheet paints (avoids a light-mode flash).
+        // Everything is defensive: even if localStorage is unavailable, the toggle still works.
         (function () {
-            var t = localStorage.getItem('tmd-theme');
-            if (t !== 'dark' && t !== 'light')
-                t = (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+            var t = 'light';
+            try { t = localStorage.getItem('tmd-theme'); } catch (e) { }
+            if (t !== 'dark' && t !== 'light') {
+                try { t = (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light'; }
+                catch (e) { t = 'light'; }
+            }
             document.documentElement.setAttribute('data-theme', t);
-            window.tmdTheme = {
-                get: function () { return document.documentElement.getAttribute('data-theme') || 'light'; },
-                toggle: function () {
-                    var n = window.tmdTheme.get() === 'dark' ? 'light' : 'dark';
-                    document.documentElement.setAttribute('data-theme', n);
-                    try { localStorage.setItem('tmd-theme', n); } catch (e) { }
-                    return n;
-                }
-            };
         })();
     </script>
     <link rel="icon" href="logo.svg" type="image/svg+xml" />
     <link rel="alternate icon" href="favicon.ico" sizes="any" />
-    <link href="css/app.css" rel="stylesheet" />
+    @* Cache-busted per app run so WebView2/browsers can never serve a stale stylesheet
+       (a cached pre-dark-mode app.css makes the theme toggle appear to do nothing). *@
+    <link href="css/app.css?v=@Stamp" rel="stylesheet" />
     <HeadOutlet @rendermode="InteractiveServer" />
 </head>
 <body>
@@ -33,3 +30,9 @@
     <script src="_framework/blazor.web.js"></script>
 </body>
 </html>
+
+@code {
+    // Constant for the lifetime of the process; changes on every app start/update so
+    // static assets are always re-fetched.
+    private static readonly string Stamp = DateTime.UtcNow.Ticks.ToString();
+}

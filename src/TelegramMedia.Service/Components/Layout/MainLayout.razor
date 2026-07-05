@@ -8,10 +8,11 @@
                 <img src="logo.svg" alt="logo" width="36" height="36" />
             </div>
             <h2>Telegram Downloader</h2>
-            @* Pure client-side toggle — a native onclick so it works regardless of the Blazor
-               circuit. tmdTheme is defined in the head script (App.razor). The contrast glyph
-               needs no per-mode state, so a layout re-render can never clobber it. *@
-            <button class="theme-toggle-icon" type="button" onclick="tmdTheme.toggle()"
+            @* Pure client-side toggle. The handler is fully self-contained (no dependency on
+               any script having loaded, the Blazor circuit, or localStorage availability), so
+               nothing can stop the click from flipping the theme. *@
+            <button class="theme-toggle-icon" type="button"
+                    onclick="var h=document.documentElement,n=h.getAttribute('data-theme')==='dark'?'light':'dark';h.setAttribute('data-theme',n);try{localStorage.setItem('tmd-theme',n)}catch(e){}"
                     title="Toggle dark / light theme" aria-label="Toggle theme">
                 <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                      stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
