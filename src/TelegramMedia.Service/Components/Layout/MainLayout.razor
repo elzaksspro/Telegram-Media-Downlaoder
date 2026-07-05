@@ -8,9 +8,16 @@
                 <img src="logo.svg" alt="logo" width="36" height="36" />
             </div>
             <h2>Telegram Downloader</h2>
-            <button class="theme-toggle-icon" @onclick="ToggleTheme"
-                    title="@(_theme == "dark" ? "Switch to light mode" : "Switch to dark mode")">
-                @(_theme == "dark" ? "☀️" : "🌙")
+            @* Pure client-side toggle — a native onclick so it works regardless of the Blazor
+               circuit. tmdTheme is defined in the head script (App.razor). The contrast glyph
+               needs no per-mode state, so a layout re-render can never clobber it. *@
+            <button class="theme-toggle-icon" type="button" onclick="tmdTheme.toggle()"
+                    title="Toggle dark / light theme" aria-label="Toggle theme">
+                <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                     stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="9"/>
+                    <path d="M12 3a9 9 0 0 0 0 18z" fill="currentColor" stroke="none"/>
+                </svg>
             </button>
         </div>
         <ul class="nav-menu">
@@ -60,30 +67,9 @@
 @code {
     [Inject] private TelegramMedia.Core.Interfaces.ITelegramClientService TelegramClient { get; set; } = default!;
     [Inject] private NavigationManager Navigation { get; set; } = default!;
-    [Inject] private Microsoft.JSInterop.IJSRuntime JS { get; set; } = default!;
 
     private System.Threading.Timer? _statusTimer;
     private TelegramMedia.Core.Enums.AuthState _lastState;
-    private string _theme = "light";
-
-    protected override async Task OnAfterRenderAsync(bool firstRender)
-    {
-        if (firstRender)
-        {
-            try
-            {
-                _theme = await JS.InvokeAsync<string>("tmdTheme.get");
-                StateHasChanged();
-            }
-            catch { /* prerender/JS not ready — button just shows the default label */ }
-        }
-    }
-
-    private async Task ToggleTheme()
-    {
-        try { _theme = await JS.InvokeAsync<string>("tmdTheme.toggle"); }
-        catch { /* ignore */ }
-    }
 
     private string StatusClass => TelegramClient.AuthState switch
     {

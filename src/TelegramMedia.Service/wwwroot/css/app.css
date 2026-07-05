@@ -181,17 +181,23 @@ a:hover { color: var(--accent-hover); }
     width: 34px;
     height: 34px;
     flex-shrink: 0;
+    padding: 0;
     background: var(--bg-input);
     border: 1px solid var(--border);
     border-radius: 50%;
-    font-size: 15px;
+    color: var(--text-secondary);
     cursor: pointer;
     display: flex;
     align-items: center;
     justify-content: center;
     transition: all 0.15s ease;
 }
-.theme-toggle-icon:hover { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
+.theme-toggle-icon:hover {
+    color: var(--accent);
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-glow);
+}
+.theme-toggle-icon svg { display: block; }
 
 .status-indicator {
     font-size: 0.78rem;
