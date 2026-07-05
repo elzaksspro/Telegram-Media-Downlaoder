@@ -21,6 +21,7 @@ public class TelegramClientService : ITelegramClientService, IDisposable
     private readonly string _sessionPath;
 
     // Auth flow state
+    private TaskCompletionSource<string>? _phoneTcs;
     private TaskCompletionSource<string>? _codeTcs;
     private TaskCompletionSource<string>? _passwordTcs;
     private int _apiId;
@@ -61,7 +62,7 @@ public class TelegramClientService : ITelegramClientService, IDisposable
         };
     }
 
-    private Client CreateClient(string? phoneNumber = null)
+    private Client CreateClient()
     {
         string? ConfigProvider(string what)
         {
@@ -73,14 +74,19 @@ public class TelegramClientService : ITelegramClientService, IDisposable
                 // supported way to persist a login; passing a raw FileStream made the app
                 // responsible for those semantics and dropped the saved authorization.
                 case "session_pathname": return _sessionPath;
+                // WTelegram only asks for these when a fresh login is needed (a valid resumed
+                // session never hits them). We block the WTelegram thread until the UI supplies
+                // each value via the TCSes — same single client drives the whole flow.
                 case "phone_number":
-                    var phone = phoneNumber ?? _pendingPhone;
-                    // If WTelegram asks for a phone number while we're only trying to resume a
-                    // stored session, the session is gone/expired → a real login is required.
-                    if (string.IsNullOrEmpty(phone)) _resumeNeededLogin = true;
-                    return phone;
-                case "verification_code": return _codeTcs?.Task.GetAwaiter().GetResult();
-                case "password": return _passwordTcs?.Task.GetAwaiter().GetResult();
+                    AuthState = AuthState.WaitingForPhoneNumber;
+                    OnStatusMessage?.Invoke("Sign in to Telegram to continue.");
+                    return _phoneTcs!.Task.GetAwaiter().GetResult();
+                case "verification_code":
+                    AuthState = AuthState.WaitingForCode;
+                    return _codeTcs!.Task.GetAwaiter().GetResult();
+                case "password":
+                    AuthState = AuthState.WaitingForPassword;
+                    return _passwordTcs!.Task.GetAwaiter().GetResult();
                 default: return null;
             }
         }
@@ -118,107 +124,92 @@ public class TelegramClientService : ITelegramClientService, IDisposable
         }
     }
 
-    private string? _pendingPhone;
-    private bool _resumeNeededLogin;
+    // Serialize all client creation/auth so only ONE WTelegram Client ever touches the session
+    // file at a time. Sharing session.dat across Client instances corrupts the saved login.
+    private readonly SemaphoreSlim _authGate = new(1, 1);
 
     public async Task ConnectAsync(int apiId, string apiHash)
     {
-        if (_client != null && _currentUser != null) return;
-
-        _apiId = apiId;
-        _apiHash = apiHash;
-
-        _client?.Dispose();
-        _codeTcs = new TaskCompletionSource<string>();
-        _passwordTcs = new TaskCompletionSource<string>();
-        _resumeNeededLogin = false;
-        _client = CreateClient();
-
-        // Try to resume the stored session (no phone number provided). reloginOnFailedResume:false
-        // so a failed resume throws the REAL error instead of silently starting a fresh login
-        // (which would ask for a phone number and hide why the session didn't resume).
+        await _authGate.WaitAsync();
         try
         {
-            _currentUser = await _client.LoginUserIfNeeded(null, reloginOnFailedResume: false);
+            if (_client != null) return; // one client for the whole lifetime; already connecting/connected
+
+            _apiId = apiId;
+            _apiHash = apiHash;
+            _phoneTcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+            _codeTcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+            _passwordTcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+            _client = CreateClient();
+
+            // ONE LoginUserIfNeeded call handles both cases on the same client:
+            //  - valid saved session  → resumes silently (never asks for phone/code)
+            //  - no/expired session   → the config callback blocks on the TCSes (AuthState moves
+            //                            to WaitingForPhoneNumber/Code) until the UI supplies them.
+            // reloginOnFailedResume:false so a transient resume hiccup on a *valid* session is
+            // thrown (and retried) instead of wiping the saved login.
+            _ = Task.Run(RunLoginAsync);
+        }
+        finally
+        {
+            _authGate.Release();
+        }
+    }
+
+    private async Task RunLoginAsync()
+    {
+        var client = _client;
+        if (client == null) return;
+        try
+        {
+            _currentUser = await client.LoginUserIfNeeded(null, reloginOnFailedResume: false);
             AuthState = AuthState.Authenticated;
             OnStatusMessage?.Invoke($"Logged in as {_currentUser.first_name} {_currentUser.last_name}".Trim());
-            _logger.LogInformation("Authenticated as {User} (resumed session)", _currentUser.first_name);
+            _logger.LogInformation("Authenticated as {User}", _currentUser.first_name);
         }
         catch (Exception ex)
         {
-            _client?.Dispose();
-            _client = null;
-
-            if (_resumeNeededLogin)
+            // A valid session that hits a transient resume error lands here (NOT wiped). Drop the
+            // client so the monitor worker can cleanly retry the resume; the session file is kept.
+            _logger.LogWarning(ex, "Telegram resume/login failed; will retry.");
+            OnStatusMessage?.Invoke("Could not reach Telegram; will retry.");
+            await _authGate.WaitAsync();
+            try
             {
-                // The stored session is genuinely gone/expired → user must sign in again.
-                AuthState = AuthState.WaitingForPhoneNumber;
-                _logger.LogInformation(ex, "No valid Telegram session; interactive login required.");
-            }
-            else
-            {
-                // Transient failure (e.g. no network yet). KEEP the session file and stay
-                // "NotAuthenticated" so the monitor worker retries the resume — do NOT force
-                // the user to log in again.
+                try { client.Dispose(); } catch { /* best-effort */ }
+                if (ReferenceEquals(_client, client)) { _client = null; _currentUser = null; }
                 AuthState = AuthState.NotAuthenticated;
-                OnStatusMessage?.Invoke("Could not reach Telegram; will retry (still signed in).");
-                _logger.LogWarning(ex, "Telegram session resume failed transiently; will retry.");
             }
+            finally { _authGate.Release(); }
         }
     }
 
     public async Task<string> SendCodeAsync(string phoneNumber)
     {
-        _pendingPhone = phoneNumber;
-        _codeTcs = new TaskCompletionSource<string>();
-        _passwordTcs = new TaskCompletionSource<string>();
-
-        _client?.Dispose();
-        _client = CreateClient(phoneNumber);
+        // Reuse the SAME client/login flow started by ConnectAsync — just feed it the phone.
+        // If no client exists yet (e.g. app just started), create one first.
+        if (_client == null)
+            await ConnectAsync(_apiId, _apiHash);
 
         AuthState = AuthState.WaitingForCode;
         OnStatusMessage?.Invoke($"Sending verification code to {phoneNumber}...");
+        _phoneTcs?.TrySetResult(phoneNumber);
 
-        // Run login flow in background — LoginUserIfNeeded will block on
-        // _codeTcs and _passwordTcs via the ConfigProvider callback
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                _currentUser = await _client.LoginUserIfNeeded();
-                AuthState = AuthState.Authenticated;
-                OnStatusMessage?.Invoke($"Logged in as {_currentUser.first_name} {_currentUser.last_name}".Trim());
-                _logger.LogInformation("Authenticated as {User}; Telegram session saved to {Path}",
-                    _currentUser.first_name, _sessionPath);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Login failed");
-                OnStatusMessage?.Invoke($"Login failed: {ex.Message}");
-                AuthState = AuthState.NotAuthenticated;
-            }
-        });
-
-        await Task.Delay(2000);
+        await Task.Delay(1500);
         return "Verification code sent";
     }
 
     public Task<bool> SubmitCodeAsync(string code)
     {
-        if (_codeTcs != null && !_codeTcs.Task.IsCompleted)
-        {
-            _codeTcs.SetResult(code);
-            AuthState = AuthState.WaitingForPassword; // May or may not need password
-        }
+        // The config callback advances AuthState (to WaitingForPassword or Authenticated);
+        // we just hand the code to the waiting login flow.
+        _codeTcs?.TrySetResult(code);
         return Task.FromResult(true);
     }
 
     public Task<bool> SubmitPasswordAsync(string password)
     {
-        if (_passwordTcs != null && !_passwordTcs.Task.IsCompleted)
-        {
-            _passwordTcs.SetResult(password);
-        }
+        _passwordTcs?.TrySetResult(password);
         return Task.FromResult(true);
     }
 
@@ -796,17 +787,34 @@ public class TelegramClientService : ITelegramClientService, IDisposable
 
     public async Task DisconnectAsync()
     {
-        if (_client != null)
+        await _authGate.WaitAsync();
+        try
         {
-            await Task.Run(() => _client.Dispose());
-            _client = null;
-            _currentUser = null;
+            // Release any login flow blocked waiting for phone/code/password so it can unwind.
+            _phoneTcs?.TrySetCanceled();
+            _codeTcs?.TrySetCanceled();
+            _passwordTcs?.TrySetCanceled();
+
+            if (_client != null)
+            {
+                var c = _client;
+                _client = null;
+                _currentUser = null;
+                await Task.Run(() => { try { c.Dispose(); } catch { /* best-effort */ } });
+            }
             AuthState = AuthState.NotAuthenticated;
+        }
+        finally
+        {
+            _authGate.Release();
         }
     }
 
     public void Dispose()
     {
-        _client?.Dispose();
+        _phoneTcs?.TrySetCanceled();
+        _codeTcs?.TrySetCanceled();
+        _passwordTcs?.TrySetCanceled();
+        try { _client?.Dispose(); } catch { /* best-effort */ }
     }
 }
