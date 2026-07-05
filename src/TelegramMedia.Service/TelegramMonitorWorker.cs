@@ -10,6 +10,7 @@ public class TelegramMonitorWorker : BackgroundService
     private readonly ITelegramClientService _telegramClient;
     private readonly IServiceProvider _serviceProvider;
     private readonly ILogger<TelegramMonitorWorker> _logger;
+    private AuthState? _lastLoggedWaitState;
 
     public TelegramMonitorWorker(
         ITelegramClientService telegramClient,
@@ -52,10 +53,17 @@ public class TelegramMonitorWorker : BackgroundService
 
                 if (_telegramClient.AuthState != AuthState.Authenticated)
                 {
-                    _logger.LogInformation("Waiting for authentication... (State: {State})", _telegramClient.AuthState);
+                    // Log only when the state changes, so a signed-out app doesn't spam the log
+                    // every 5s while it waits for the user to sign in.
+                    if (_lastLoggedWaitState != _telegramClient.AuthState)
+                    {
+                        _lastLoggedWaitState = _telegramClient.AuthState;
+                        _logger.LogInformation("Waiting for authentication... (State: {State})", _telegramClient.AuthState);
+                    }
                     await Task.Delay(5000, stoppingToken);
                     continue;
                 }
+                _lastLoggedWaitState = null;
 
                 // Start monitoring
                 _logger.LogInformation("Starting real-time monitoring...");

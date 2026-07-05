@@ -42,6 +42,23 @@ public class TelegramClientService : ITelegramClientService, IDisposable
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "TelegramMediaDownloader", "session.dat");
         Directory.CreateDirectory(Path.GetDirectoryName(_sessionPath)!);
+
+        WireWTelegramLogging();
+    }
+
+    private static bool _wtLogWired;
+    private void WireWTelegramLogging()
+    {
+        if (_wtLogWired) return;
+        _wtLogWired = true;
+        WTelegram.Helpers.Log = (lvl, msg) =>
+        {
+            // Only surface warnings/errors to keep logs small during heavy downloading; routine
+            // WTelegram chatter (levels 0-2) is dropped.
+            if (lvl < 3) return;
+            var level = lvl == 4 ? LogLevel.Error : lvl >= 5 ? LogLevel.Critical : LogLevel.Warning;
+            _logger.Log(level, "[WTelegram] {Message}", msg);
+        };
     }
 
     private Client CreateClient(string? phoneNumber = null)
@@ -117,10 +134,12 @@ public class TelegramClientService : ITelegramClientService, IDisposable
         _resumeNeededLogin = false;
         _client = CreateClient();
 
-        // Try to resume the stored session (no phone number provided).
+        // Try to resume the stored session (no phone number provided). reloginOnFailedResume:false
+        // so a failed resume throws the REAL error instead of silently starting a fresh login
+        // (which would ask for a phone number and hide why the session didn't resume).
         try
         {
-            _currentUser = await _client.LoginUserIfNeeded();
+            _currentUser = await _client.LoginUserIfNeeded(null, reloginOnFailedResume: false);
             AuthState = AuthState.Authenticated;
             OnStatusMessage?.Invoke($"Logged in as {_currentUser.first_name} {_currentUser.last_name}".Trim());
             _logger.LogInformation("Authenticated as {User} (resumed session)", _currentUser.first_name);
