@@ -42,6 +42,7 @@ proper download manager: **scan a channel, pick exactly what you want, and contr
   min-size rules.
 - **💾 Persistent** — settings, queue, history, and pause state are stored locally (SQLite)
   and survive restarts.
+- **🌙 Dark mode** — sidebar toggle; follows your system preference by default.
 
 ## Download & install (end users)
 

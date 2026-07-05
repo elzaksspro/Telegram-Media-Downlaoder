@@ -32,6 +32,40 @@
     --shadow-lg: 0 8px 24px rgba(15,23,42,0.08);
 }
 
+/* ====== Dark theme ====== */
+:root[data-theme="dark"] {
+    --bg-body: #0b1220;
+    --bg-sidebar: #0f172a;
+    --bg-card: #111a2e;
+    --bg-input: #0f172a;
+    --bg-hover: rgba(59,130,246,0.10);
+    --text-primary: #e2e8f0;
+    --text-secondary: #94a3b8;
+    --text-muted: #64748b;
+    --accent: #3b82f6;
+    --accent-glow: rgba(59,130,246,0.16);
+    --accent-hover: #60a5fa;
+    --success: #22c55e;
+    --success-bg: rgba(34,197,94,0.14);
+    --warning: #f59e0b;
+    --warning-bg: rgba(245,158,11,0.14);
+    --danger: #ef4444;
+    --danger-bg: rgba(239,68,68,0.14);
+    --border: #1e293b;
+    --border-light: #334155;
+    --shadow: 0 1px 2px rgba(0,0,0,0.35), 0 1px 3px rgba(0,0,0,0.25);
+    --shadow-lg: 0 8px 24px rgba(0,0,0,0.5);
+}
+
+/* Dark-mode fixes for colors that are hardcoded for light backgrounds */
+:root[data-theme="dark"] .badge-video { color: #93c5fd; }
+:root[data-theme="dark"] .badge-photo { color: #86efac; }
+:root[data-theme="dark"] .badge-music { color: #fcd34d; }
+:root[data-theme="dark"] .badge-file  { color: #7dd3fc; }
+:root[data-theme="dark"] .status-indicator.disconnected { color: #f87171; }
+:root[data-theme="dark"] .btn-secondary:hover { background: var(--border-light); }
+:root[data-theme="dark"] .alert-info { color: #93c5fd; }
+
 html, body {
     height: 100%;
     font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
@@ -140,6 +174,24 @@ a:hover { color: var(--accent-hover); }
     padding: 16px;
     border-top: 1px solid var(--border);
 }
+
+/* Compact theme toggle in the sidebar header (top) */
+.theme-toggle-icon {
+    margin-left: auto;
+    width: 34px;
+    height: 34px;
+    flex-shrink: 0;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: 50%;
+    font-size: 15px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.15s ease;
+}
+.theme-toggle-icon:hover { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
 
 .status-indicator {
     font-size: 0.78rem;
@@ -645,6 +697,7 @@ select.form-control {
     .nav-menu li a { justify-content: center; padding: 14px; }
     .sidebar-header { justify-content: center; padding: 18px 10px; }
     .sidebar-header h2 { display: none; }
+    .theme-toggle-icon { display: none; }
     .main-content { padding: 20px; }
     .stats-grid { grid-template-columns: 1fr 1fr; }
     .inline-form { flex-direction: column; }

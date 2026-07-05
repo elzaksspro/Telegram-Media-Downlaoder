@@ -5,6 +5,24 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Telegram Media Downloader</title>
     <base href="/" />
+    <script>
+        // Apply the saved theme before the stylesheet paints (avoids a light-mode flash).
+        (function () {
+            var t = localStorage.getItem('tmd-theme');
+            if (t !== 'dark' && t !== 'light')
+                t = (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+            document.documentElement.setAttribute('data-theme', t);
+            window.tmdTheme = {
+                get: function () { return document.documentElement.getAttribute('data-theme') || 'light'; },
+                toggle: function () {
+                    var n = window.tmdTheme.get() === 'dark' ? 'light' : 'dark';
+                    document.documentElement.setAttribute('data-theme', n);
+                    try { localStorage.setItem('tmd-theme', n); } catch (e) { }
+                    return n;
+                }
+            };
+        })();
+    </script>
     <link rel="icon" href="logo.svg" type="image/svg+xml" />
     <link rel="alternate icon" href="favicon.ico" sizes="any" />
     <link href="css/app.css" rel="stylesheet" />

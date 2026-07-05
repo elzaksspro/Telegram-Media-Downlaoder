@@ -8,6 +8,10 @@
                 <img src="logo.svg" alt="logo" width="36" height="36" />
             </div>
             <h2>Telegram Downloader</h2>
+            <button class="theme-toggle-icon" @onclick="ToggleTheme"
+                    title="@(_theme == "dark" ? "Switch to light mode" : "Switch to dark mode")">
+                @(_theme == "dark" ? "☀️" : "🌙")
+            </button>
         </div>
         <ul class="nav-menu">
             <li class="@GetNavClass("/")">
@@ -56,9 +60,30 @@
 @code {
     [Inject] private TelegramMedia.Core.Interfaces.ITelegramClientService TelegramClient { get; set; } = default!;
     [Inject] private NavigationManager Navigation { get; set; } = default!;
+    [Inject] private Microsoft.JSInterop.IJSRuntime JS { get; set; } = default!;
 
     private System.Threading.Timer? _statusTimer;
     private TelegramMedia.Core.Enums.AuthState _lastState;
+    private string _theme = "light";
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            try
+            {
+                _theme = await JS.InvokeAsync<string>("tmdTheme.get");
+                StateHasChanged();
+            }
+            catch { /* prerender/JS not ready — button just shows the default label */ }
+        }
+    }
+
+    private async Task ToggleTheme()
+    {
+        try { _theme = await JS.InvokeAsync<string>("tmdTheme.toggle"); }
+        catch { /* ignore */ }
+    }
 
     private string StatusClass => TelegramClient.AuthState switch
     {
